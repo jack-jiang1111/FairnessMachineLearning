@@ -21,6 +21,7 @@ import pickle
 import random
 from explanation_metrics import *
 from parse import *
+import math
 
 
 def train(epoch, model):
@@ -29,6 +30,10 @@ def train(epoch, model):
 
     hidden, output = model(x=X)
     l_classification = F.cross_entropy(output[idx_train], labels[idx_train].long())
+    
+    # Initialize distance losses
+    l_distance = torch.tensor(0.0)
+    l_distance_masked = torch.tensor(0.0)
     
     if epoch < args.opt_start_epoch: # warm start
         loss_train = l_classification
@@ -71,6 +76,9 @@ def train(epoch, model):
                 p0_val, p1_val, REF_val, \
                 v0_val, v1_val, VEF_val
                 ])
+            
+            # Print validation metrics
+            print(f"Epoch {epoch}: Val Acc={acc_val:.4f}, Val F1={f1_val:.4f}, Val AUC={auc_roc_val:.4f}, Val SP={sp_val:.4f}, Val EO={eo_val:.4f}")
 
 if __name__ == '__main__':
     args = parse_args()
@@ -83,7 +91,36 @@ if __name__ == '__main__':
         print("The new directory is created for saving the training logs.")
 
     # load dataset
-    adj, features, labels, idx_train, idx_val, idx_test, sens = load_data_util(args.dataset)
+    if args.use_similarity_split:
+        from utils import load_data_util_similarity_based, fair_metric
+        chosen_seed = None
+        adj = features = labels = idx_train = idx_val = idx_test = sens = None
+        for attempt in range(args.max_split_seed_tries):
+            split_seed = args.split_seed_base + attempt
+            adj_tmp, features_tmp, labels_tmp, idx_train_tmp, idx_val_tmp, idx_test_tmp, sens_tmp = load_data_util_similarity_based(
+                args.dataset, t1=args.t1, t2=args.t2, t3=args.t3, fair_noise=args.fair_noise, verbose=False, seed=split_seed
+            )
+            if adj_tmp is None:
+                continue
+            sp_tr, eo_tr = fair_metric(labels_tmp[idx_train_tmp].cpu().numpy(), labels_tmp[idx_train_tmp].cpu().numpy(), sens_tmp[idx_train_tmp].cpu().numpy())
+            sp_va, eo_va = fair_metric(labels_tmp[idx_val_tmp].cpu().numpy(), labels_tmp[idx_val_tmp].cpu().numpy(), sens_tmp[idx_val_tmp].cpu().numpy())
+            fair_tr = (sp_tr + eo_tr) / 2
+            fair_va = (sp_va + eo_va) / 2
+            # ensure training fairness score larger (more biased) than validation and test
+            sp_te, eo_te = fair_metric(labels_tmp[idx_test_tmp].cpu().numpy(), labels_tmp[idx_test_tmp].cpu().numpy(), sens_tmp[idx_test_tmp].cpu().numpy())
+            fair_te = (sp_te + eo_te) / 2
+            if fair_tr > fair_va and fair_tr > fair_te:
+                chosen_seed = split_seed
+                adj, features, labels, idx_train, idx_val, idx_test, sens = adj_tmp, features_tmp, labels_tmp, idx_train_tmp, idx_val_tmp, idx_test_tmp, sens_tmp
+                break
+        if chosen_seed is None:
+            # fallback to last attempt
+            adj, features, labels, idx_train, idx_val, idx_test, sens = adj_tmp, features_tmp, labels_tmp, idx_train_tmp, idx_val_tmp, idx_test_tmp, sens_tmp
+            print(f"[Info] Fairness condition not met within {args.max_split_seed_tries} seeds. Proceeding with seed {split_seed}.")
+        else:
+            print(f"[Info] Using similarity-based split with seed {chosen_seed}.")
+    else:
+        adj, features, labels, idx_train, idx_val, idx_test, sens = load_data_util(args.dataset)
     adj_ori = adj
     adj = normalize_scipy(adj)
     features = feature_norm(features)
@@ -127,4 +164,27 @@ if __name__ == '__main__':
     "_seed_"+str(args.seed)+"_"+str(args.lr)+"_"+str(args.weight_decay)\
     +"_"+str(args.dropout)+".npy"
     np.save(open(filename, 'wb'), logs)
+
+    # Print final test results
+    model.eval()
+    with torch.no_grad():
+        hidden, output = model(x=X)
+        preds = (output.argmax(axis=1)).type_as(labels)
+        
+        # Test accuracy, F1, and AUC
+        acc_test = accuracy_score(labels[idx_test.cpu().numpy()].cpu().numpy(), preds[idx_test.cpu().numpy()].cpu().numpy())
+        f1_test = f1_score(labels[idx_test.cpu().numpy()].cpu().numpy(), preds[idx_test.cpu().numpy()].cpu().numpy())
+        auc_test = roc_auc_score(one_hot_labels[idx_test.cpu().numpy()], output.detach().cpu().numpy()[idx_test.cpu().numpy()])
+        
+        
+        # Test explanation fairness metrics
+        p0_test, p1_test, REF_test, v0_test, v1_test, VEF_test = interpretation.interprete(model=model, idx=idx_test.cpu().numpy())
+        
+        print(f"\n=== Final Test Results ===")
+        print(f"Y Accuracy: {acc_test:.4f}")
+        print(f"F1 Score: {f1_test:.4f}")
+        print(f"AUC Score: {auc_test:.4f}")
+        print(f"REF (Explanation Fairness): {REF_test:.4f}")
+        print(f"VEF (Explanation Fairness): {VEF_test:.4f}")
+        print(f"==========================\n")
 

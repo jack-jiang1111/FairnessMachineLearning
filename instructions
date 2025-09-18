@@ -1,0 +1,258 @@
+This record the general idea of this research project
+
+Mixture of Experts (MoE) Fairness System Design
+Overview
+We propose a Mixture of Experts (MoE) framework to balance accuracy, group fairness, and procedural fairness. The system contains three experts, each specializing in different objectives, and a gating network that dynamically routes inputs. Regularization (load balancing and entropy) ensures that the gate distributes data effectively, while adversarial debiasing enhances fairness.
+
+Components
+1. Expert 1: Standard Model
+Architecture: Multi-layer perceptron (MLP).
+Objective: Optimize for prediction accuracy.
+Role: Serves as the baseline expert, capturing the strongest predictive patterns without fairness-specific constraints.
+
+
+2. Expert 2: Group Fairness Expert (result driven fairness)
+Objective: Minimize disparities between sensitive groups (e.g., demographic parity, equalized odds).
+please refer a picture called expert2.PNG in picture folder for more detail
+
+Goal: Ensure low group-level fairness gaps during training.
+
+3. Expert 3: Procedural Fairness Expert
+Objective: Focus on fairness at the feature and mechanism level.
+Techniques:
+Attention-based feature fairness: Monitor attention or feature importance weights and reduce differences across sensitive groups.
+Hidden embedding fairness: Train adversarial networks that try to predict the sensitive attribute from hidden embeddings. The main model minimizes this adversary’s accuracy, encouraging group-invariant representations.
+Output fairness: Apply adversarial debiasing on the final logits to reduce sensitive group leakage in predictions.
+Goal: Guarantee that the model is procedurally fair by treating features and internal representations consistently across groups.
+
+refer to train_attention_fairness.py for more detail, it only provides a attention feature model without adversial part, we may need to add that part in actual implementation
+
+
+
+Gating Network
+Architecture: reinforce learning policy maker producing weights for each expert.
+Mechanism:
+Takes input features and outputs routing weights over the three experts.
+Weighted combination of expert outputs forms the final prediction.
+
+
+
+Regularization for the Gate
+Load-balancing loss: Prevents expert collapse by encouraging equal usage of all experts. This is typically achieved by penalizing deviation from uniform expert selection.
+Entropy regularization: Encourages the gate to make confident but diverse assignments, avoiding uniform trivial routing.
+
+
+
+Adversarial Debiasing (Expert 3):
+Train adversarial classifiers on hidden embeddings and logits to predict sensitive attributes.
+Reverse gradients or minimize adversary’s accuracy to enforce fairness.
+
+
+Gatenetwork detail:
+Gate as a Policy Network
+Input: model features or hidden representation from the input.
+Output: probability distribution over the three experts (softmax over [g1, g2, g3]).
+Interpretation: gate is a stochastic policy that “decides how much to use each expert” or which expert to emphasize.
+
+
+
+🔹 2. RL Setup
+Action:
+Sample weighted mixture using the gate probabilities (stochastic soft mixture).
+Reward:
+Compute the final score after experts’ predictions:
+score = (F1 + ACC + AUC)/3 + (DP + EO)/2 + (REF + VEF + Attention)/3
+This is non-differentiable, perfect for RL.
+
+
+Policy Gradient (REINFORCE):
+Let the gate probabilities be pθ(g∣x)p_\theta(g|x)pθ​(g∣x).
+Update gate using:
+L_gate = - (score - baseline) * log_prob(action)
+baseline = moving average of previous scores to reduce variance.
+
+🔹 3. Stabilization Techniques
+Entropy Regularization: prevent the gate from collapsing to a single expert:
+L_entropy = - sum(p * log(p))
+Load Balancing: ensure all experts are used reasonably often.
+Reward Normalization: scale scores to stabilize training.
+
+🔹 4. Hybrid Training with Experts
+Step 1: Pretrain Experts
+Each expert optimizes its own differentiable loss:
+Expert 1 → accuracy
+Expert 2 → fairness (representation alignment + threshold adjustments)
+Expert 3 → procedural fairness (feature-weight alignment)
+
+Step 2: Train Gate with RL
+Freeze expert
+Gate samples expert actions / weighted mixture.
+Compute reward = final composite score.
+Apply REINFORCE update.
+
+Step 3: Iterate
+Experts can be periodically fine-tuned if needed, but primary learning of final score maximization is through the gate policy.
+
+🔹 5. Example Pseudocode
+for batch in data:
+    # Gate outputs probabilities
+    probs = gate(batch.x)  # shape: [batch_size, 3]
+    
+    # Sample experts (stochastic)
+    actions = [sample_from(p) for p in probs]
+    
+    # Forward pass through chosen experts
+    y_pred = []
+    for i, a in enumerate(actions):
+        y_pred.append(experts[a](batch.x[i]))
+    y_pred = combine(y_pred, probs)  # soft or hard mixture
+    
+    # Compute non-differentiable reward
+    reward = compute_final_score(y_pred, batch.y, batch.groups)
+    
+    # Policy gradient update for gate
+    log_prob = sum(log(probs[i][actions[i]]) for i in range(batch_size))
+    gate_loss = - (reward - baseline) * log_prob
+    gate_loss.backward()
+    
+    # Optionally update experts with their own loss
+    expert_losses = [expert_loss(experts[i], batch) for i in range(3)]
+    sum(expert_losses).backward()
+    
+    optimizer.step()
+    update_baseline(reward)
+
+
+✅ Key Points
+Experts optimize differentiable losses (can be trained separately first).
+Gate uses RL to maximize a non-differentiable final score.
+Soft or stochastic mixture allows exploration.
+Entropy and load balancing prevent collapse.
+
+
+Other instructions
+
+1. for the final score, we meausre three parts: utility(average of F1,AUC,ACC), fairness result (average of DP,EO), and fairness procedure (avaergae of VEF,REF,attention_jsd)
+2. for the training, you can refer the tran.py for some little techinuqe, like start to add fair term in the middle of training, give utlity a warm start
+We can use that idea, since expert 1,2,3 all share a utility model at the start.
+3. create a new folder called moe_expert, and implement code in that folder
+
+
+Datasets & sensitive attributes
+Which datasets are in scope for the first iteration (bail, german, math, por)?
+use bail for the first run
+
+For each dataset, what is the sensitive attribute(s) to use (e.g., sex, race)? Any multi-attribute cases?
+refer line 120-124 in test.py
+
+Do we need a unified preprocessing loader for all four datasets?
+just do a simple split train/test/validation you can refer the load_bail function in util.py
+
+Metrics details
+Are F1, ACC, AUC macro, micro, or binary (positive class) metrics? Thresholding at 0.5?
+all classfication is binary
+
+For DP and EO, which exact formulations (e.g., demographic parity gap vs ratio, equalized odds averaged TPR/FPR gaps)? Signed vs absolute?
+refer def fair_metric(pred, labels, sens): in utils.py
+
+For procedural metrics, how are REF and VEF defined here? Do we already have implementations in explanation_metrics.py, or elsewhere?
+refer class Interpreter in explanation_metrics.py
+
+“attention_jsd”: is this Jensen–Shannon divergence of attention distributions across groups? Over which layer(s) and normalized how?
+refer the training code of train_attention_fairness.py, train function for more detail.
+
+
+Composite score and scaling
+Should the final score be exactly: utility = (F1+ACC+AUC)/3, fairness_result = (DP+EO)/2, fairness_procedure = (REF+VEF+Attention)/3, then sum of the three?
+yes
+
+Do we need normalization/standardization of the three parts to keep them on comparable scales? Any weights different from equal weighting?
+just keep the fomrula simple, the sum of the three
+
+Experts
+Expert 1/2/3 architectures: are all MLPs sharing the same base backbone, or separate models initialized from a shared “utility model”?
+we can initialized from a shared utility model, after half of the epoch, they diverge
+
+For Expert 2 (group fairness), which loss do you want first: DP penalty, EO penalty, or adversarial debiasing on logits? Any preferred reference implementation?
+group fairness expert2 don't have a adversial term, i put an image, there are some basic concept
+
+For Expert 3 (procedural fairness), should we implement both attention alignment and adversarial debiasing on embeddings/logits, or start with attention only?
+implement both
+
+Do experts output logits or probabilities? Any calibration required?
+probabilities, a number between 0 to 1, we will feed this into gate network
+
+Training schedule
+Pretrain experts: for how many epochs and with which loss mixes (e.g., warm start with utility only, then add fairness at epoch K)?
+user will input an epoch number, warm start with half the epoch number, if user input 1000 epoch, warm start 500.
+
+During gate RL training, should experts be fully frozen, or lightly fine-tuned after every N steps/epochs?
+lighly fine_tuned after every 100 epoch
+
+Do you want the “start to add fair term in the middle of training” replicated for Expert 2/3? If so, at what epoch/criterion?
+yes add fair term in the middle of training(after the warm start)
+
+Gating network (policy)
+Input to the gate: raw features, shared backbone embedding, or concatenation of per-expert features?
+sure
+
+Output usage at inference: hard argmax routing, stochastic sampling, or soft mixture (weighted sum of expert logits)?
+soft mixture
+
+Entropy regularization coefficient and target load-balancing objective (e.g., KL to uniform over experts across a batch)? Over batch or moving average?
+moving average please
+
+Exploration control: temperature for softmax or Gumbel-softmax? Any annealing schedule?
+
+
+REINFORCE specifics
+Reward computed per-sample, per-batch, or per-mini-episode? If per-batch, is score computed on that batch only?
+per-batch reward
+
+Baseline: moving average over recent rewards per-batch? Momentum/decay value?
+moving average of previous batch rewards.
+
+Any variance reduction (e.g., reward normalization within batch)?
+Reward normalization within batch
+
+Optimizer and LR for the gate?
+Optimizer: Adam or AdamW works well for policy networks.
+Learning rate:
+Typically lower than standard supervised training.
+Suggested: 1e-3 → 1e-4, may need tuning.
+Can use LR decay or warmup.
+
+Attention fairness implementation
+Which attention mechanism to use (from train_attention_fairness.py)? Which layer(s) produce the attention weights we compare across groups?
+use the default one IG,the mlp layer ,please just use the same code in train_attention_fairness for attention section
+
+Group-wise attention aggregation: averaged over samples per group per batch, then JSD? With smoothing epsilon?
+refer the train_attention_fairness code
+
+Evaluation & logging
+Validation protocol: single validation split or k-fold? Early stopping criteria?
+Seeds and determinism requirements?
+refer to the train.py and train_attentuion_fairness.py
+
+Where to log: reuse train_logs/ and experiment_results/ formats? Any mandatory CSV schema?
+log to train_log and also to console
+
+
+Compute & environment
+Target framework is PyTorch (as in current scripts)? CUDA available on your machine?
+yes pytorch and cuda available
+
+Any constraints on training time or memory (batch size limits)?
+no
+
+Project structure
+We’ll create moe_expert/ as requested. Do you want separate files like gate.py, experts.py, trainer.py, metrics.py, utils.py inside it, or a different layout?
+sure seperate files
+
+Deployment/inference behavior
+At inference, should the gate pick a single expert (deterministic) or use a soft mixture? If single, any tie-breaking?
+soft mixture
+
+Success criteria
+What baseline(s) should we surpass (existing train.py and train_attention_fairness.py results)? Any target improvements on fairness and minimal utility drop?
+just the final score

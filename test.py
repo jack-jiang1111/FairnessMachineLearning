@@ -173,12 +173,8 @@ if __name__ == '__main__':
         v0_test, v1_test, VEF_test
         ]
 
-    # write logs to file
+    # Log results (no file writing)
     logs = np.array(logs)
-    filename = "./test_logs/"+str(args.dataset)+"_best_test_result.txt"
-    f = open(filename, "a+")
-    logs_string = ' '.join([str(t) for t in logs])
-    logs_string += "\n"
-    f.write(logs_string)
+    print(f"Test Results: {logs}")
 
 

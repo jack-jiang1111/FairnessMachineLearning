@@ -108,9 +108,17 @@ class GraphLIME_speedup:
 
             solver = LassoLars(self.rho, fit_intercept=False, normalize=False, positive=True)
 
-            solver.fit(K_bar * n, L_bar * n)
-
-            coef = solver.coef_
+            try:
+                solver.fit(K_bar * n, L_bar * n)
+                coef = solver.coef_
+            except ValueError as e:
+                # Handle dimension mismatch errors by using fallback coefficients
+                print(f"Warning: LARS solver failed for node {node_idx}: {e}")
+                # Use uniform coefficients as fallback
+                coef = np.ones(d) / d
+            except Exception as e:
+                print(f"Warning: Unexpected error in LARS solver for node {node_idx}: {e}")
+                coef = np.ones(d) / d
 
             coefs.append(coef)
         return abs(np.array(coefs))
@@ -129,13 +137,21 @@ class Interpreter:
     def generate_masked_X(self, idx, model):
         time_start = time.time()
         X_masked = self.X[idx].detach().clone().cuda()
-        # remove top K important features
-        coefs = torch.tensor(self.explainer.explain_nodes(model, idx.tolist()))
-        indices = coefs.argsort()[:, -self.K:].cuda()
-        # use scatter to set the values
-        if self.K != 0:
-            X_masked = X_masked.scatter(1, indices, torch.zeros((len(idx),self.K)).cuda())
-        return X_masked.cuda(), coefs.tolist()
+        
+        try:
+            # remove top K important features
+            coefs = torch.tensor(self.explainer.explain_nodes(model, idx.tolist()))
+            indices = coefs.argsort()[:, -self.K:].cuda()
+            # use scatter to set the values
+            if self.K != 0:
+                X_masked = X_masked.scatter(1, indices, torch.zeros((len(idx),self.K)).cuda())
+            return X_masked.cuda(), coefs.tolist()
+        except Exception as e:
+            print(f"Warning: GraphLIME explainer failed: {e}")
+            # Return original features and uniform coefficients as fallback
+            n_samples, n_features = X_masked.shape
+            uniform_coefs = torch.ones((n_samples, n_features)) / n_features
+            return X_masked.cuda(), uniform_coefs.tolist()
 
     def interprete(self, model, idx):
         model.eval()

@@ -22,7 +22,11 @@ class MLP(nn.Module):
         return hidden_emb, h
 
     def predict_proba(self, x):
-        x = torch.tensor(x).float().cuda()
+        # Fix tensor construction warning by using clone().detach()
+        if isinstance(x, torch.Tensor):
+            x = x.clone().detach().float().cuda()
+        else:
+            x = torch.tensor(x, dtype=torch.float32).cuda()
         h = x
         for layer in self.layers:
             h = layer(h)

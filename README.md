@@ -61,3 +61,57 @@ Two proposed explanation fairness metrics are in _explanation_metrics.py_ where 
 [2] Agarwal, Chirag, Himabindu Lakkaraju, and Marinka Zitnik. "Towards a unified framework for fair and stable graph representation learning." In Uncertainty in Artificial Intelligence, pp. 2114-2124. PMLR, 2021.
 ```
 
+Define a fairness score s = (DP+EO)/2 ,the average of DP and EO score
+We will measure the fairness score of training set/testing set/ and model predict result
+
+Measurement matrix
+Define a fair score: s = (dp + eo)/2 (lower the better)
+Define a fairness improvement of a ml model:
+s1(training) = fair score of training set
+s2(testing) = fair score of testing set
+s3(predict) = fair score of predicting model
+fairImprovement(I score) = (s1-s3)/(s1-s2) . We use methods to ensure s1>=s2, which means the training set is more baised than the testing set. 
+Ratio discussion: the I score is range from -\inf to \inf. When we cap the ratio to (0,\inf), because a negative score indicates the model did worse on fairness.A score ranges from 0-1 means the model improve some fairness, but didn’t reach the test set standard. A score equal 1 means the model can improve fair reaching the same fair level of test set. A score larger than 1 means the model improve fair level much more than the test set. 
+The fairImprovement score: the larger the better.
+
+
+Define a new method to split the train/test data.
+assume we define t1: training, t2: validiation, t3: testing. t1+t2+t3 = 1
+given a fair noise range (0-1)
+given a seed value
+Each dataset has a senstive label. 
+Our approch: first split all data into two groups based on senstive label (group s1 and s2).
+based on the fair noise, like 10%, then there is a 10% chance we random select two data into test set (these two data may from same group or different group)
+For each data point in s1, find the most similar point in s2 (most similar means besides from the predict label, all other labels are similar)
+And if this data point in s1 is similar with data point in s2, and their predict label are the same, then sort them into testing dataset
+Then we keep looping this process, util the testing dataset capacity has reach the threshold (>=t2+t3)
+Then randomly split the testing dataset into test and validation based on t2 and t3. 
+And then, we have successfully split all the dataset into train/validation/test
+After split the dataset, we need to print out the fairness score of each part
+we ensure the training set fair score is larger than test and validation, otherwise retry with a different seed value.
+fair score lower is better
+
+
+We define a final score
+final score = (auc+f1+acc)/3-(dp+eo)/2-(vef+ref)/2+log(I)
+the first part measure utility, second part measure result fairness, third part mesure procedure fairness, the lass part measure debias ability of the model.
+let's implment this score system during the training process, print out the final score along the training process
+
+
+python train.py --epoch 450 --use_similarity_split
+python train.py --epoch 500 --dataset german
+
+
+We will import a new matrix called GAD
+
+first during the training process, we will measure the attention vector
+for each data, we will collect the attention vector as (a1,a2,a3...) the sume equal 1.
+
+then we group them by the senstive label (female/male) (white/nonwhite)
+Then compute the average attention per group
+we will get something like this male group = [a1,a2,a3..]
+femail group [b1,b2,b3...]
+Then next step we will compare the group distrubution
+compare the two average attention distrubutions with jensen-shannon divergence also called JSD
+
+since the current training process doesn't contain a attention mechism, we need to use a SHAP value to measure it
