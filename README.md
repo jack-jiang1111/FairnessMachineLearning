@@ -115,3 +115,203 @@ Then next step we will compare the group distrubution
 compare the two average attention distrubutions with jensen-shannon divergence also called JSD
 
 since the current training process doesn't contain a attention mechism, we need to use a SHAP value to measure it
+
+python -m moe_expert.run_moe
+
+
+We treat the gate as a policy network that selects or weights experts. Reward is your proposed relative score:
+
+𝑅
+=
+(
+𝑢
+2
+−
+𝑢
+1
+)
+−
+(
+𝑓
+2
+−
+𝑓
+1
+)
+R=(u
+2
+	​
+
+−u
+1
+	​
+
+)−(f
+2
+	​
+
+−f
+1
+	​
+
+)
+🔎 RL Setup
+State
+
+Input features 
+𝑥
+x (same as experts).
+
+Optionally: disagreement signals between experts (e.g., variance of predictions).
+
+Action
+
+Gate outputs a distribution over experts (via softmax).
+
+Sample an expert (or weighted mixture with Gumbel-softmax).
+
+Reward
+
+Compute:
+
+Baseline scores from Expert1 → 
+𝑢
+1
+,
+𝑓
+1
+u
+1
+	​
+
+,f
+1
+	​
+
+.
+
+Mixture scores from gate output → 
+𝑢
+2
+,
+𝑓
+2
+u
+2
+	​
+
+,f
+2
+	​
+
+.
+
+Reward:
+
+𝑅
+=
+(
+𝑢
+2
+−
+𝑢
+1
+)
+−
+(
+𝑓
+2
+−
+𝑓
+1
+)
+R=(u
+2
+	​
+
+−u
+1
+	​
+
+)−(f
+2
+	​
+
+−f
+1
+	​
+
+)
+Policy Gradient
+
+Compute log-prob of chosen expert:
+
+m = torch.distributions.Categorical(probs_gate)
+action = m.sample()
+log_prob = m.log_prob(action)
+
+
+Loss (REINFORCE):
+
+advantage = R - baseline
+loss = -advantage * log_prob
+
+
+Update baseline with EMA of rewards to reduce variance.
+
+Add entropy bonus to encourage exploration.
+
+🧩 Pseudocode (training loop)
+for epoch in range(num_epochs):
+    Xb, yb, sb = get_batch()
+
+    # ---- Expert 1 baseline ----
+    _, p1 = expert1(Xb)
+    u1, f1 = compute_scores(p1, yb, sb)  # utility ↑, fairness ↓
+
+    # ---- Gate decision ----
+    probs_gate = gate(Xb)   # (batch, 3)
+    dist = torch.distributions.Categorical(probs_gate)
+    action = dist.sample()  # pick expert index per sample
+
+    # ---- Mixture result ----
+    outputs = []
+    _, p2 = expert2(Xb); outputs.append(p2)
+    _, p3 = expert3(Xb); outputs.append(p3)
+    experts = [p1, p2, p3]
+    chosen_outputs = torch.stack([experts[a][i] for i,a in enumerate(action)])
+
+    u2, f2 = compute_scores(chosen_outputs, yb, sb)
+
+    # ---- Reward ----
+    R = (u2 - u1) - (f2 - f1)
+    reward = torch.tensor(R, device=device)
+
+    # ---- Baseline and advantage ----
+    baseline = momentum * baseline + (1 - momentum) * reward.item()
+    advantage = reward - baseline
+
+    # ---- REINFORCE loss ----
+    log_prob = dist.log_prob(action)
+    entropy = dist.entropy().mean()
+    loss = -advantage * log_prob - beta * entropy
+
+    opt_g.zero_grad()
+    loss.backward()
+    opt_g.step()
+
+🛠️ Notes
+
+Per-batch reward: compute 
+𝑢
+,
+𝑓
+u,f averaged over batch (reduces noise).
+
+Baseline: EMA over last rewards.
+
+Entropy bonus: keeps gate from collapsing to uniform / single expert too early.
+
+Variance reduction: normalize rewards in batch (z-score).
+
+⚡ This way, the gate is pure RL: it learns a policy that chooses experts only when doing better than Expert1 baseline.

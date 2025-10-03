@@ -64,7 +64,7 @@ def train(epoch, model):
             sp_val, eo_val = fair_metric(preds[idx_val.cpu().numpy()].cpu().numpy(), labels[idx_val.cpu().numpy()].cpu().numpy(),\
                 sens[idx_val.cpu().numpy()].cpu().numpy())
 
-            p0_val, p1_val, REF_val, v0_val, v1_val, VEF_val \
+            p0_val, p1_val, REF_val, v0_val, v1_val, VEF_val, att_jsd_val \
             = interpretation.interprete(model=model, idx=idx_val.cpu().numpy())
 
             # record validation logs
@@ -74,7 +74,7 @@ def train(epoch, model):
                 acc_val, auc_roc_val, f1_val, \
                 sp_val, eo_val, \
                 p0_val, p1_val, REF_val, \
-                v0_val, v1_val, VEF_val
+                v0_val, v1_val, VEF_val, att_jsd_val
                 ])
             
             # Print validation metrics
@@ -178,7 +178,7 @@ if __name__ == '__main__':
         
         
         # Test explanation fairness metrics
-        p0_test, p1_test, REF_test, v0_test, v1_test, VEF_test = interpretation.interprete(model=model, idx=idx_test.cpu().numpy())
+        p0_test, p1_test, REF_test, v0_test, v1_test, VEF_test, att_jsd_test = interpretation.interprete(model=model, idx=idx_test.cpu().numpy())
         
         print(f"\n=== Final Test Results ===")
         print(f"Y Accuracy: {acc_test:.4f}")
@@ -186,5 +186,6 @@ if __name__ == '__main__':
         print(f"AUC Score: {auc_test:.4f}")
         print(f"REF (Explanation Fairness): {REF_test:.4f}")
         print(f"VEF (Explanation Fairness): {VEF_test:.4f}")
+        print(f"Attention JSD: {att_jsd_test:.4f}")
         print(f"==========================\n")
 

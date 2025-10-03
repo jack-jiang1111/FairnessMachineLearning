@@ -289,7 +289,7 @@ def load_por(dataset="por", sens_attr="sex", predict_attr="G3", path="dataset/po
     labels = torch.LongTensor(labels)
 
     import random
-    random.seed(20)
+    random.seed(1)
     label_idx_0 = np.where(labels==0)[0]
     label_idx_1 = np.where(labels==1)[0]
     random.shuffle(label_idx_0)

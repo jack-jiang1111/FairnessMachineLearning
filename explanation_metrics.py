@@ -7,6 +7,7 @@ import torch.nn as nn
 from sklearn.linear_model import LassoLars, LinearRegression
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph
+from captum.attr import IntegratedGradients
 
 
 class GraphLIME_speedup:
@@ -198,6 +199,78 @@ class Interpreter:
         top_acc_fidelity_g0 = original_acc_0 - masked_acc_0
         top_acc_fidelity_g1 = original_acc_1 - masked_acc_1
 
+        # Compute attention JSD using integrated gradients
+        try:
+            att_jsd = self._compute_attention_jsd(model, idx, sens)
+        except Exception as e:
+            print(f"Warning: Attention JSD computation failed: {e}")
+            att_jsd = 0.0
+
         return p0, p1, abs(p0-p1), \
-        top_acc_fidelity_g0, top_acc_fidelity_g1, abs(top_acc_fidelity_g0-top_acc_fidelity_g1)
+        top_acc_fidelity_g0, top_acc_fidelity_g1, abs(top_acc_fidelity_g0-top_acc_fidelity_g1), att_jsd
+
+    def _compute_attention_jsd(self, model, idx, sens):
+        """Compute attention JSD using integrated gradients"""
+        model.eval()
+        
+        # Get input features for the batch
+        X_batch = self.X[idx]
+        
+        # Create a wrapper that returns only the final output
+        def forward_wrapper(x):
+            _, output = model(x)
+            return output
+        
+        # Create Integrated Gradients explainer
+        ig = IntegratedGradients(forward_wrapper)
+        
+        # Define baseline (zeros)
+        baseline = torch.zeros_like(X_batch)
+        
+        # Get attributions
+        attributions = ig.attribute(X_batch, baseline, target=1)
+        
+        # Convert to attention weights (absolute values, normalized)
+        attention_weights = torch.abs(attributions)
+        attention_weights = attention_weights / (attention_weights.sum(dim=1, keepdims=True) + 1e-8)
+        
+        # Split by sensitive groups
+        group_0_mask = (sens == 0)
+        group_1_mask = (sens == 1)
+        
+        if group_0_mask.sum() == 0 or group_1_mask.sum() == 0:
+            return 0.0
+        
+        attention_group_0 = attention_weights[group_0_mask]
+        attention_group_1 = attention_weights[group_1_mask]
+        
+        # Compute Jensen-Shannon Divergence
+        jsd = self._compute_jensen_shannon_divergence(attention_group_0, attention_group_1)
+        
+        return jsd.item()
+    
+    def _compute_jensen_shannon_divergence(self, attention_group1, attention_group2):
+        """Compute Jensen-Shannon Divergence between two attention distributions"""
+        # Compute mean attention for each group
+        mean_attention_group1 = attention_group1.mean(dim=0)
+        mean_attention_group2 = attention_group2.mean(dim=0)
+        
+        # Ensure non-negative and normalize
+        eps = 1e-8
+        mean_attention_group1 = torch.clamp(mean_attention_group1, min=eps)
+        mean_attention_group2 = torch.clamp(mean_attention_group2, min=eps)
+        
+        mean_attention_group1 = mean_attention_group1 / mean_attention_group1.sum()
+        mean_attention_group2 = mean_attention_group2 / mean_attention_group2.sum()
+        
+        # Compute Jensen-Shannon Divergence
+        M = 0.5 * (mean_attention_group1 + mean_attention_group2)
+        
+        # KL divergence: KL(P || Q) = sum(P * log(P / Q))
+        kl1 = (mean_attention_group1 * torch.log(mean_attention_group1 / M)).sum()
+        kl2 = (mean_attention_group2 * torch.log(mean_attention_group2 / M)).sum()
+        
+        jsd = 0.5 * kl1 + 0.5 * kl2
+        
+        return jsd
         
