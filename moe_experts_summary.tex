@@ -1,0 +1,435 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\geometry{margin=1in}
+
+\title{MoE Expert Models: A Comprehensive Analysis of Three Specialized Fairness-Aware Neural Networks}
+\author{Fairness Machine Learning Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+This document provides a detailed mathematical and architectural analysis of the three expert models implemented in the Mixture of Experts (MoE) framework for fairness-aware machine learning. The system consists of three specialized neural network experts, each designed to address different aspects of fairness in machine learning: utility optimization, result-driven fairness, and procedural fairness.
+
+\section{Architecture Overview}
+
+All three experts inherit from a common \texttt{ExpertBase} class and share a fundamental Multi-Layer Perceptron (MLP) backbone. The base architecture consists of:
+
+\begin{itemize}
+    \item Input layer: $d_{input}$ dimensions
+    \item Hidden layer: $d_{hidden} = 8$ dimensions (default)
+    \item Output layer: 2 dimensions (binary classification)
+    \item Activation: LeakyReLU
+    \item Dropout: 0.3 (applied to hidden layer)
+\end{itemize}
+
+The forward pass of each expert follows the pattern:
+\begin{align}
+    h &= \text{MLP}_{hidden}(x) \in \mathbb{R}^{d_{hidden}} \\
+    \ell &= \text{MLP}_{output}(h) \in \mathbb{R}^{2} \\
+    p &= \text{softmax}(\ell) \in \mathbb{R}^{2}
+\end{align}
+
+where $h$ represents the hidden representation, $\ell$ the logits, and $p$ the output probabilities.
+
+\section{Expert 1: Utility-Focused Expert}
+
+\subsection{Objective}
+Expert 1 is designed to maximize predictive accuracy without explicit fairness constraints. It serves as a baseline utility-focused model.
+
+\subsection{Architecture}
+Expert 1 inherits directly from \texttt{ExpertBase} without additional components. The loss function is the standard cross-entropy loss:
+
+\begin{equation}
+    \mathcal{L}_{E1} = \text{CrossEntropy}(p, y) = -\sum_{i=1}^{n} \sum_{c=0}^{1} y_{i,c} \log(p_{i,c})
+\end{equation}
+
+where $y_{i,c}$ is the one-hot encoded true label for sample $i$ and class $c$, and $p_{i,c}$ is the predicted probability.
+
+\subsection{Mathematical Formulation}
+The complete loss computation is:
+\begin{align}
+    \mathcal{L}_{E1} &= \mathcal{L}_{CE} \\
+    \mathcal{L}_{CE} &= -\frac{1}{n} \sum_{i=1}^{n} \log(p_{i,y_i})
+\end{align}
+
+where $y_i$ is the true class label for sample $i$.
+
+\section{Expert 2: Result-Driven Fairness Expert}
+
+\subsection{Objective}
+Expert 2 addresses result-driven fairness by incorporating both representation alignment and demographic parity/equal opportunity constraints.
+
+\subsection{Architecture}
+Expert 2 extends \texttt{ExpertBase} with two additional hyperparameters:
+\begin{itemize}
+    \item $\lambda_{rep}$: Weight for representation alignment loss
+    \item $\lambda_{fair}$: Weight for fairness loss
+\end{itemize}
+
+\subsection{Mathematical Formulation}
+
+The total loss function combines three components:
+
+\begin{equation}
+    \mathcal{L}_{E2} = \mathcal{L}_{CE} + \lambda_{rep} \cdot \mathcal{L}_{rep} + \lambda_{fair} \cdot \mathcal{L}_{fair}
+\end{equation}
+
+\subsubsection{Representation Alignment Loss}
+The representation alignment loss minimizes the distance between group mean embeddings:
+
+\begin{align}
+    \mu_0 &= \frac{1}{n_0} \sum_{i: s_i = 0} h_i \\
+    \mu_1 &= \frac{1}{n_1} \sum_{i: s_i = 1} h_i \\
+    \mathcal{L}_{rep} &= ||\mu_0 - \mu_1||_2^2
+\end{align}
+
+where $s_i \in \{0,1\}$ is the sensitive attribute for sample $i$, and $n_0, n_1$ are the counts of samples in each group.
+
+\subsubsection{Fairness Loss}
+The fairness loss combines demographic parity (DP) and equal opportunity (EO) gaps:
+
+\begin{equation}
+    \mathcal{L}_{fair} = \frac{\mathcal{L}_{DP} + \mathcal{L}_{EO}}{2}
+\end{equation}
+
+\textbf{Demographic Parity Gap:}
+\begin{align}
+    p_0 &= \frac{1}{n_0} \sum_{i: s_i = 0} p_{i,1} \\
+    p_1 &= \frac{1}{n_1} \sum_{i: s_i = 1} p_{i,1} \\
+    \mathcal{L}_{DP} &= |p_0 - p_1|
+\end{align}
+
+\textbf{Equal Opportunity Gap:}
+\begin{align}
+    p_0^{pos} &= \frac{1}{n_0^{pos}} \sum_{i: s_i = 0, y_i = 1} p_{i,1} \\
+    p_1^{pos} &= \frac{1}{n_1^{pos}} \sum_{i: s_i = 1, y_i = 1} p_{i,1} \\
+    \mathcal{L}_{EO} &= |p_0^{pos} - p_1^{pos}|
+\end{align}
+
+where $p_{i,1}$ is the probability of positive class for sample $i$, and $n_0^{pos}, n_1^{pos}$ are the counts of positive samples in each group.
+
+\section{Expert 3: Procedural Fairness Expert}
+
+\subsection{Objective}
+Expert 3 addresses procedural fairness through attention alignment and adversarial debiasing techniques.
+
+\subsection{Architecture}
+Expert 3 extends \texttt{ExpertBase} with:
+\begin{itemize}
+    \item $\lambda_{attention}$: Weight for attention fairness loss
+    \item $\lambda_{adv}$: Weight for adversarial debiasing loss
+    \item Gradient Reversal Layer (GRL) for adversarial training
+    \item Two adversarial networks: one for hidden representations, one for logits
+\end{itemize}
+
+\subsection{Mathematical Formulation}
+
+The total loss function is:
+
+\begin{equation}
+    \mathcal{L}_{E3} = \mathcal{L}_{CE} + \lambda_{attention} \cdot \mathcal{L}_{attention} + \lambda_{adv} \cdot \mathcal{L}_{adv}
+\end{equation}
+
+\subsubsection{Attention Fairness Loss}
+The attention fairness loss uses Jensen-Shannon Divergence (JSD) to measure the difference in attention distributions between groups:
+
+\begin{align}
+    \mathcal{L}_{attention} &= \text{JSD}(A_0, A_1) \\
+    \text{JSD}(A_0, A_1) &= \frac{1}{2} \text{KL}(A_0 || M) + \frac{1}{2} \text{KL}(A_1 || M)
+\end{align}
+
+where $M = \frac{1}{2}(A_0 + A_1)$ is the average distribution, and $A_0, A_1$ are the mean attention weights for each group.
+
+The attention weights are extracted using interpretability methods (SHAP, Integrated Gradients, LIME, or Gradient SHAP) and normalized:
+
+\begin{equation}
+    A_{i,j} = \frac{|\text{attribution}_{i,j}|}{\sum_{k=1}^{d} |\text{attribution}_{i,k}| + \epsilon}
+\end{equation}
+
+\subsubsection{Adversarial Debiasing Loss}
+The adversarial loss prevents the model from learning sensitive attribute information:
+
+\begin{equation}
+    \mathcal{L}_{adv} = \frac{\mathcal{L}_{adv}^{hidden} + \mathcal{L}_{adv}^{logits}}{2}
+\end{equation}
+
+\textbf{Hidden Representation Adversarial Loss:}
+\begin{align}
+    h_{adv} &= \text{GRL}(h) \\
+    \ell_{adv}^{hidden} &= \text{MLP}_{adv}^{hidden}(h_{adv}) \\
+    \mathcal{L}_{adv}^{hidden} &= \text{CrossEntropy}(\ell_{adv}^{hidden}, s)
+\end{align}
+
+\textbf{Logits Adversarial Loss:}
+\begin{align}
+    p_{adv} &= \text{GRL}(p) \\
+    \ell_{adv}^{logits} &= \text{MLP}_{adv}^{logits}(p_{adv}) \\
+    \mathcal{L}_{adv}^{logits} &= \text{CrossEntropy}(\ell_{adv}^{logits}, s)
+\end{align}
+
+\subsubsection{Gradient Reversal Layer}
+The GRL implements adversarial training by reversing gradients during backpropagation:
+
+\begin{align}
+    \text{GRL}(x) &= x \quad \text{(forward pass)} \\
+    \frac{\partial \text{GRL}(x)}{\partial x} &= -\lambda \quad \text{(backward pass)}
+\end{align}
+
+\section{Implementation Details}
+
+\subsection{MLP Backbone}
+The shared MLP backbone uses the following architecture:
+\begin{itemize}
+    \item Linear layer: $d_{input} \rightarrow d_{hidden}$
+    \item LeakyReLU activation
+    \item Dropout (0.3)
+    \item Linear layer: $d_{hidden} \rightarrow 2$
+\end{itemize}
+
+\subsection{Adversarial Networks}
+Expert 3 includes two adversarial networks:
+
+\textbf{Hidden Adversarial Network:}
+\begin{itemize}
+    \item Input: $d_{hidden}$ dimensions
+    \item Hidden: $\max(4, d_{hidden}/2)$ dimensions
+    \item Output: 2 dimensions (sensitive attribute prediction)
+\end{itemize}
+
+\textbf{Logits Adversarial Network:}
+\begin{itemize}
+    \item Input: 2 dimensions (logits)
+    \item Hidden: 8 dimensions
+    \item Output: 2 dimensions (sensitive attribute prediction)
+\end{itemize}
+
+\section{Training and Optimization}
+
+Each expert is trained independently with its specialized loss function. The training process involves:
+
+\begin{enumerate}
+    \item Forward pass through the MLP backbone
+    \item Computation of specialized loss components
+    \item Backpropagation with appropriate gradient modifications (e.g., GRL for Expert 3)
+    \item Parameter updates using standard optimization algorithms
+\end{enumerate}
+
+\section{Gating Network Architecture}
+
+\subsection{Overview}
+The Gating Network is responsible for selecting which expert to use for each input sample. It uses a REINFORCE-based policy gradient approach to learn optimal expert selection.
+
+\subsection{Architecture}
+The gating network consists of:
+\begin{itemize}
+    \item Input layer: $d_{input} + 3 \cdot d_{classes} + 3 + 1$ dimensions
+    \item Hidden layer: 16 dimensions (default)
+    \item Output layer: 3 dimensions (one for each expert)
+    \item Activation: ReLU
+    \item Temperature parameter: $\tau = 1.0$ for softmax scaling
+\end{itemize}
+
+\subsection{State Representation}
+The gating network receives an augmented state vector:
+\begin{equation}
+    s = [x, p_1, p_2, p_3, \text{conf}_1, \text{conf}_2, \text{conf}_3, \text{disagree}]
+\end{equation}
+
+where:
+\begin{align}
+    \text{conf}_i &= \max(p_i) \quad \text{(confidence of expert } i\text{)} \\
+    \text{disagree} &= \frac{1}{3} \left( \|p_1 - p_2\|_1 + \|p_1 - p_3\|_1 + \|p_2 - p_3\|_1 \right)
+\end{align}
+
+\subsection{Policy Formulation}
+The gating network outputs a probability distribution over experts:
+\begin{align}
+    \ell &= \text{MLP}(s) \in \mathbb{R}^3 \\
+    \pi(a|s) &= \text{softmax}(\ell/\tau) \in \mathbb{R}^3
+\end{align}
+
+\subsection{Action Sampling}
+Expert selection follows a categorical distribution:
+\begin{align}
+    a &\sim \text{Categorical}(\pi(a|s)) \\
+    \log \pi(a|s) &= \ell_a - \log \sum_{j=1}^3 \exp(\ell_j/\tau)
+\end{align}
+
+\subsection{Mixture Output}
+The final prediction is a weighted combination of expert outputs:
+\begin{equation}
+    p_{final} = \sum_{i=1}^3 \pi_i \cdot p_i
+\end{equation}
+
+where $\pi_i$ is the gating probability for expert $i$ and $p_i$ is the output probability from expert $i$.
+
+\subsection{Expert Routing}
+During training, each sample is routed to its selected expert:
+\begin{equation}
+    p_{selected} = \begin{cases}
+        p_1 & \text{if } a = 1 \\
+        p_2 & \text{if } a = 2 \\
+        p_3 & \text{if } a = 3
+    \end{cases}
+\end{equation}
+
+During evaluation, the mixture output is used for consistent performance measurement.
+
+\section{Training Algorithm}
+
+\subsection{Two-Phase Training}
+The MoE system uses a two-phase training approach:
+
+\subsubsection{Phase 1: Expert Pretraining}
+Each expert is pretrained independently for $\frac{T}{2}$ epochs:
+\begin{align}
+    \mathcal{L}_{total} &= \mathcal{L}_{E1} + \mathcal{L}_{E2} + \mathcal{L}_{E3} \\
+    \mathcal{L}_{E1} &= \text{CrossEntropy}(p_1, y) \\
+    \mathcal{L}_{E2} &= \text{CrossEntropy}(p_2, y) + \lambda_{rep} \mathcal{L}_{rep} + \lambda_{fair} \mathcal{L}_{fair} \\
+    \mathcal{L}_{E3} &= \text{CrossEntropy}(p_3, y) + \lambda_{attention} \mathcal{L}_{attention} + \lambda_{adv} \mathcal{L}_{adv}
+\end{align}
+
+\subsubsection{Phase 2: Gate Training}
+The gating network is trained using REINFORCE for $\frac{T}{2}$ epochs.
+
+\subsection{REINFORCE Algorithm}
+The gate training uses policy gradient with the following components:
+
+\subsubsection{Reward Formulation}
+The reward function balances utility improvement and fairness improvement:
+\begin{equation}
+    R = (U_2 - U_1) - (F_2 - F_1)
+\end{equation}
+
+where:
+\begin{align}
+    U &= \frac{\text{Accuracy} + \text{F1} + \text{AUC}}{3} \\
+    F &= \frac{F_{result} + F_{procedure}}{2} \\
+    F_{result} &= \frac{\text{DP} + \text{EO}}{2} \\
+    F_{procedure} &= \frac{\text{REF} + \text{VEF} + \text{ATT}}{3}
+\end{align}
+
+\subsubsection{Baseline and Advantage}
+A moving average baseline is used to reduce variance:
+\begin{align}
+    b_{t+1} &= \alpha \cdot b_t + (1-\alpha) \cdot R_t \\
+    A_t &= R_t - b_t
+\end{align}
+
+\subsubsection{Policy Loss}
+The policy loss includes entropy regularization and load balancing:
+\begin{equation}
+    \mathcal{L}_{gate} = -\mathbb{E}[\log \pi(a|s) \cdot A] - \lambda_{entropy} \mathcal{H}(\pi) + \lambda_{lb} \mathcal{L}_{lb}
+\end{equation}
+
+\subsubsection{Entropy Regularization}
+The entropy term encourages exploration:
+\begin{equation}
+    \mathcal{H}(\pi) = -\sum_{i=1}^3 \pi_i \log(\pi_i + \epsilon)
+\end{equation}
+
+where $\epsilon$ is a small constant to avoid numerical issues.
+
+\subsection{Load Balancing}
+To ensure balanced expert usage, a KL divergence penalty is applied:
+\begin{align}
+    q_i &= \frac{\text{usage\_ma}_i + \epsilon}{\sum_{j=1}^3 (\text{usage\_ma}_j + \epsilon)} \\
+    \mathcal{L}_{lb} &= \text{KL}(q \| \text{Uniform}(1/3))
+\end{align}
+
+where $\text{usage\_ma}_i$ is updated using exponential moving average:
+\begin{equation}
+    \text{usage\_ma}_i^{(t+1)} = \beta \cdot \text{usage\_ma}_i^{(t)} + (1-\beta) \cdot \pi_i^{(t)}
+\end{equation}
+
+\subsection{Expert Fine-tuning}
+During gate training, experts are periodically fine-tuned to maintain their performance:
+\begin{equation}
+    \mathcal{L}_{fine-tune} = \mathcal{L}_{E1} + \mathcal{L}_{E2} + \mathcal{L}_{E3}
+\end{equation}
+
+This fine-tuning occurs every 100 epochs to prevent expert degradation during gate training.
+
+\section{Evaluation Metrics}
+
+\subsection{Utility Metrics}
+\begin{align}
+    \text{Accuracy} &= \frac{1}{n} \sum_{i=1}^n \mathbb{1}[\hat{y}_i = y_i] \\
+    \text{F1} &= \frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}} \\
+    \text{AUC} &= \int_0^1 \text{TPR}(t) \cdot \text{FPR}'(t) \, dt
+\end{align}
+
+\subsection{Result Fairness Metrics}
+\begin{align}
+    \text{DP Gap} &= \left| \mathbb{E}[\hat{y}|s=0] - \mathbb{E}[\hat{y}|s=1] \right| \\
+    \text{EO Gap} &= \left| \mathbb{E}[\hat{y}|s=0, y=1] - \mathbb{E}[\hat{y}|s=1, y=1] \right|
+\end{align}
+
+\subsection{Procedural Fairness Metrics}
+\begin{align}
+    \text{REF} &= \text{Representation Fairness} \\
+    \text{VEF} &= \text{Value Fairness} \\
+    \text{ATT} &= \text{Attention JSD between groups}
+\end{align}
+
+\subsection{Final Score}
+The overall performance is evaluated using:
+\begin{equation}
+    \text{Final Score} = U - F_{result} - F_{procedure}
+\end{equation}
+
+\section{Implementation Details}
+
+\subsection{Caching System}
+The system supports expert and gate caching:
+\begin{itemize}
+    \item Expert weights are cached after pretraining
+    \item Gate weights are cached after training
+    \item Cache directory: \texttt{weights/moe\_experts/}
+\end{itemize}
+
+\subsection{Optimization}
+\begin{itemize}
+    \item Expert optimizer: Adam with learning rate $lr$ and weight decay
+    \item Gate optimizer: Adam with learning rate $gate\_lr$ and no weight decay
+    \item Momentum for baseline: $\alpha = 0.9$
+    \item Momentum for usage tracking: $\beta = 0.9$
+\end{itemize}
+
+\subsection{Training Hyperparameters}
+\begin{itemize}
+    \item Total epochs: $T$ (default: 200)
+    \item Expert pretraining: $T/2$ epochs
+    \item Gate training: $T/2$ epochs
+    \item Learning rates: $lr = 10^{-3}$, $gate\_lr = 10^{-3}$
+    \item Regularization: $\lambda_{entropy} = 10^{-3}$, $\lambda_{lb} = 10^{-3}$
+\end{itemize}
+
+\section{Conclusion}
+
+The three expert models provide complementary approaches to fairness in machine learning:
+
+\begin{itemize}
+    \item \textbf{Expert 1}: Pure utility optimization without fairness constraints
+    \item \textbf{Expert 2}: Result-driven fairness through representation alignment and statistical parity
+    \item \textbf{Expert 3}: Procedural fairness through attention alignment and adversarial debiasing
+\end{itemize}
+
+The gating network uses REINFORCE to learn optimal expert selection, balancing utility and fairness improvements. This multi-expert framework allows for flexible combination of different fairness approaches, enabling the system to adapt to various fairness requirements and trade-offs between accuracy and fairness.
+
+\end{document}
