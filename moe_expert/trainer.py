@@ -46,13 +46,15 @@ def compute_batch_scores(y_prob: torch.Tensor, y_true: torch.Tensor, sens: torch
 
         utility = (acc + f1 + auc) / 3.0
         fairness_result = (sp + eo) / 2.0
-        fairness_procedure = (REF + VEF + att_jsd) / 3.0
+        # Normalize ATT_JSD to [0,1] scale for consistent averaging
+        att_jsd_norm = att_jsd / math.log(2) if att_jsd > 0 else att_jsd
+        fairness_procedure = (REF + VEF + att_jsd_norm) / 3.0
         final_score = utility - fairness_result - fairness_procedure
 
     return final_score, {
         "acc": acc, "f1": f1, "auc": auc,
         "sp": sp, "eo": eo,
-        "REF": REF, "VEF": VEF, "att_jsd": att_jsd,
+        "REF": REF, "VEF": VEF, "att_jsd": att_jsd_norm,
         "utility": utility, "fair_res": fairness_result, "fair_proc": fairness_procedure,
     }
 
@@ -64,7 +66,7 @@ class MoETrainer:
                  lambda_attention: float = 1.0, lambda_adv: float = 1.0,
                  gate_lr: float = 1e-3, entropy_coeff: float = 1e-3, lb_coeff: float = 1e-3,
                  use_cached_experts: bool = False, cache_dir: str = "weights/moe_experts",
-                 use_cached_gate: bool = False):
+                 use_cached_gate: bool = False, skip_gate: bool = False):
         self.dataset = dataset
         self.seed = seed
         self.cuda_device = cuda_device
@@ -81,6 +83,7 @@ class MoETrainer:
         self.use_cached_experts = use_cached_experts
         self.cache_dir = cache_dir
         self.use_cached_gate = use_cached_gate
+        self.skip_gate = skip_gate
 
         seed_everything(seed)
 
@@ -168,6 +171,22 @@ class MoETrainer:
         torch.save(self.gate.state_dict(), gp)
         print(f"[Cache] Gate saved to {gp}")
 
+    def save_best_models(self):
+        """Save best models with 'best' suffix"""
+        os.makedirs(self.cache_dir, exist_ok=True)
+        base = f"{self.dataset}"
+        best_paths = (
+            os.path.join(self.cache_dir, f"{base}_expert1_best.pt"),
+            os.path.join(self.cache_dir, f"{base}_expert2_best.pt"),
+            os.path.join(self.cache_dir, f"{base}_expert3_best.pt"),
+            os.path.join(self.cache_dir, f"{base}_gate_best.pt"),
+        )
+        torch.save(self.expert1.state_dict(), best_paths[0])
+        torch.save(self.expert2.state_dict(), best_paths[1])
+        torch.save(self.expert3.state_dict(), best_paths[2])
+        torch.save(self.gate.state_dict(), best_paths[3])
+        print(f"[Cache] Best models saved to {self.cache_dir}")
+
 
     def load_experts(self) -> bool:
         p1, p2, p3 = self.cache_paths()
@@ -196,7 +215,7 @@ class MoETrainer:
 
     def pretrain_experts(self, progress_update=None):
         warm_epochs = self.epochs // 2
-        best_scores = {1: -float('inf'), 2: float('inf'), 3: float('inf')}
+        best_scores = {1: -float('inf'), 2: float('inf'), 3: float('inf')}  # E1: max utility, E2/E3: min fairness
         best_states = {1: None, 2: None, 3: None}
 
         for epoch in range(self.epochs):
@@ -244,7 +263,7 @@ class MoETrainer:
                     f"FP={stats['fair_proc']:.4f} (REF={stats['REF']:.5f}, VEF={stats['VEF']:.5f}, ATT={stats['att_jsd']:.5f})"
                 )
 
-            # Validation monitoring every 100 epochs (no model selection)
+            # Validation monitoring every 100 epochs with model selection
             if ((epoch + 1) % 100 == 0) and (epoch + 1) > warm_epochs:
                 self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
                 Xv = self.X[self.idx_val]
@@ -257,9 +276,37 @@ class MoETrainer:
                 score1, stats1 = compute_batch_scores(p1_val, yv, sv, self.interpreter, Xv, self.expert1, att_method='integrated_gradients')
                 score2, stats2 = compute_batch_scores(p2_val, yv, sv, self.interpreter, Xv, self.expert2, att_method='integrated_gradients')
                 score3, stats3 = compute_batch_scores(p3_val, yv, sv, self.interpreter, Xv, self.expert3, att_method='integrated_gradients')
-                print(f"Epoch {epoch+1}: Val scores - E1: {stats1['utility']:.4f}, E2: {stats2['fair_res']:.4f}, E3: {stats3['fair_proc']:.4f}")
+                
+                # Model selection: each expert optimized for its specialization
+                # Expert1: utility (higher is better)
+                if stats1['utility'] > best_scores[1]:
+                    best_scores[1] = stats1['utility']
+                    best_states[1] = copy.deepcopy(self.expert1.state_dict())
+                
+                # Expert2: result fairness (lower is better, so we minimize)
+                if stats2['fair_res'] < best_scores[2]:
+                    best_scores[2] = stats2['fair_res']
+                    best_states[2] = copy.deepcopy(self.expert2.state_dict())
+                
+                # Expert3: procedural fairness (lower is better, so we minimize)
+                if stats3['fair_proc'] < best_scores[3]:
+                    best_scores[3] = stats3['fair_proc']
+                    best_states[3] = copy.deepcopy(self.expert3.state_dict())
+                
+                print(f"Epoch {epoch+1}: Val scores - E1(utility): {stats1['utility']:.4f}, E2(fair_res): {stats2['fair_res']:.4f}, E3(fair_proc): {stats3['fair_proc']:.4f}")
+                print(f"Best scores so far - E1: {best_scores[1]:.4f}, E2: {best_scores[2]:.4f}, E3: {best_scores[3]:.4f}")
 
-        # Use final trained models (no validation-based selection)
+        # Load best models from validation
+        if best_states[1] is not None:
+            self.expert1.load_state_dict(best_states[1])
+            print(f"[Model Selection] Loaded best Expert1 (utility: {best_scores[1]:.4f})")
+        if best_states[2] is not None:
+            self.expert2.load_state_dict(best_states[2])
+            print(f"[Model Selection] Loaded best Expert2 (fair_res: {best_scores[2]:.4f})")
+        if best_states[3] is not None:
+            self.expert3.load_state_dict(best_states[3])
+            print(f"[Model Selection] Loaded best Expert3 (fair_proc: {best_scores[3]:.4f})")
+        
         # Save cached experts
         self.save_experts()
 
@@ -267,7 +314,14 @@ class MoETrainer:
         self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
         self.gate.train()
 
-        gate_epochs = self.epochs // 2
+        gate_epochs = self.epochs
+        best_gate_score = -float('inf')
+        best_gate_state = None
+        
+        # Early stopping for gate
+        no_improvement_count = 0
+        early_stop_patience = 3 # if no improvement for 300 epochs, stop
+        
         for epoch in range(gate_epochs):
             Xb = self.X[self.idx_train]
             yb = self.labels[self.idx_train]
@@ -329,8 +383,8 @@ class MoETrainer:
             if progress_update is not None:
                 progress_update(1)
 
-            # Print stats every 10 epochs (post warm-start phase)
-            if (epoch + 1) % 50 == 0:
+            # Print stats every 100 epochs
+            if (epoch + 1) % 100 == 0:
                 with torch.no_grad():
                     g_avg = probs_gate.mean(dim=0)
                 # Additional delta-based reward diagnostics
@@ -362,6 +416,14 @@ class MoETrainer:
                 test_reward = (u2_t - u1_t) - (f2_t - f1_t)
                 print(f"[Gate][Test][Epoch {epoch+1}] R_test={test_reward:.4f} | u1={u1_t:.4f}, f1={f1_t:.4f} || u2={u2_t:.4f}, f2={f2_t:.4f}")
 
+                # Model selection for gate: save best based on validation final score
+                if val_stats['final_score'] > best_gate_score:
+                    best_gate_score = val_stats['final_score']
+                    best_gate_state = copy.deepcopy(self.gate.state_dict())
+                    no_improvement_count = 0  # Reset counter
+                    print(f"[Gate Selection] New best gate (final_score: {best_gate_score:.4f})")
+                else:
+                    no_improvement_count += 1
                 
                 print(
                     f"[Eval][Val][Epoch {epoch+1}] Final={val_stats['final_score']:.4f} | "
@@ -369,6 +431,12 @@ class MoETrainer:
                     f"FR={val_stats['fair_res']:.4f} (DP={val_stats['sp']:.3f}, EO={val_stats['eo']:.3f}) | "
                     f"FP={val_stats['fair_proc']:.4f} (REF={val_stats['REF']:.3f}, VEF={val_stats['VEF']:.3f}, ATT={val_stats['att_jsd']:.3f})"
                 )
+                print(f"[Gate] No improvement count: {no_improvement_count}/{early_stop_patience}")
+                
+                # Early stopping check for gate
+                if no_improvement_count >= early_stop_patience:
+                    print(f"[Early Stop] Gate training: No improvement for {early_stop_patience} epochs. Stopping at epoch {epoch+1}")
+                    break
 
             # Light expert fine-tuning every 100 epochs
             if (epoch + 1) % 100 == 0:
@@ -380,6 +448,11 @@ class MoETrainer:
                 (out1["loss"] + out2["loss"] + out3["loss"]).backward()
                 self.opt_e.step()
                 self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
+
+        # Load best gate model from validation
+        if best_gate_state is not None:
+            self.gate.load_state_dict(best_gate_state)
+            print(f"[Model Selection] Loaded best gate (final_score: {best_gate_score:.4f})")
 
     def evaluate(self, split: str = "test") -> Dict[str, float]:
         idx = {"train": self.idx_train, "val": self.idx_val, "test": self.idx_test}[split]
@@ -432,18 +505,23 @@ class MoETrainer:
             _p0, _p1v, REF2, _v0, _v1, VEF2, ATT2 = self.interpreter.interprete(model=self.expert2, idx=idx_local.cpu().numpy())
             _p0, _p1v, REF3, _v0, _v1, VEF3, ATT3 = self.interpreter.interprete(model=self.expert3, idx=idx_local.cpu().numpy())
 
-            fair_proc1 = (REF1 + VEF1 + ATT1) / 3.0
-            fair_proc2 = (REF2 + VEF2 + ATT2) / 3.0
-            fair_proc3 = (REF3 + VEF3 + ATT3) / 3.0
+            # Normalize ATT_JSD to [0,1] scale (JSD max is log(2))
+            ATT1_norm = ATT1 / math.log(2) if ATT1 > 0 else ATT1
+            ATT2_norm = ATT2 / math.log(2) if ATT2 > 0 else ATT2
+            ATT3_norm = ATT3 / math.log(2) if ATT3 > 0 else ATT3
+            
+            fair_proc1 = (REF1 + VEF1 + ATT1_norm) / 3.0
+            fair_proc2 = (REF2 + VEF2 + ATT2_norm) / 3.0
+            fair_proc3 = (REF3 + VEF3 + ATT3_norm) / 3.0
             fair_proc = (
                 g_avg[0].item() * float(fair_proc1)
                 + g_avg[1].item() * float(fair_proc2)
                 + g_avg[2].item() * float(fair_proc3)
             )
-            # Also report weighted components for transparency
+            # Also report weighted components for transparency (use normalized ATT)
             REF_w = g_avg[0].item() * float(REF1) + g_avg[1].item() * float(REF2) + g_avg[2].item() * float(REF3)
             VEF_w = g_avg[0].item() * float(VEF1) + g_avg[1].item() * float(VEF2) + g_avg[2].item() * float(VEF3)
-            ATT_w = g_avg[0].item() * float(ATT1) + g_avg[1].item() * float(ATT2) + g_avg[2].item() * float(ATT3)
+            ATT_w = g_avg[0].item() * float(ATT1_norm) + g_avg[1].item() * float(ATT2_norm) + g_avg[2].item() * float(ATT3_norm)
 
         utility = (acc + f1 + auc) / 3.0
         fairness_result = (sp + eo) / 2.0
@@ -481,23 +559,75 @@ class MoETrainer:
         }
         return stats
 
+    def evaluate_individual_experts(self, split: str = "test") -> Dict[str, float]:
+        """Evaluate individual experts and return their scores for hyperparameter tuning"""
+        idx = {"train": self.idx_train, "val": self.idx_val, "test": self.idx_test}[split]
+        Xb = self.X[idx]
+        yb = self.labels[idx]
+        sb = self.sens[idx]
+        
+        self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
+        
+        with torch.no_grad():
+            # Get individual expert predictions
+            _, p1 = self.expert1(Xb)
+            _, p2 = self.expert2(Xb)
+            _, p3 = self.expert3(Xb)
+            
+            # Evaluate each expert individually
+            score1, stats1 = compute_batch_scores(p1, yb, sb, self.interpreter, Xb, self.expert1, att_method='integrated_gradients')
+            score2, stats2 = compute_batch_scores(p2, yb, sb, self.interpreter, Xb, self.expert2, att_method='integrated_gradients')
+            score3, stats3 = compute_batch_scores(p3, yb, sb, self.interpreter, Xb, self.expert3, att_method='integrated_gradients')
+        
+        return {
+            "expert1_score": score1,
+            "expert1_stats": stats1,
+            "expert2_score": score2,
+            "expert2_stats": stats2,
+            "expert3_score": score3,
+            "expert3_stats": stats3,
+            "best_expert1_utility": stats1['utility'],
+            "best_expert2_fair_res": stats2['fair_res'],
+            "best_expert3_fair_proc": stats3['fair_proc'],
+        }
+
     def run(self):
-        total_steps = self.epochs + (self.epochs // 2)
-        with tqdm(total=total_steps, desc="MoE Training", leave=True) as pbar:
-            if self.use_cached_experts and self.load_experts():
-                # Skip pretraining; advance progress bar by pretrain steps
-                pbar.update(self.epochs)
-                print(f"[Cache] Using cached experts from {self.cache_dir}; skipping expert training.")
-            else:
-                self.pretrain_experts(progress_update=pbar.update)
-            if self.use_cached_gate and self.load_gate():
-                # Skip gate training; advance progress bar by gate steps
-                pbar.update(self.epochs // 2)
-                print(f"[Cache] Loaded cached gate from {self.cache_dir}; skipping gate training.")
-            else:
-                self.train_gate(progress_update=pbar.update)
-                self.save_gate()
-        # Use final trained gate for testing (no validation-based selection)
-        return self.evaluate("test")
+        if self.skip_gate:
+            # Expert-only training for hyperparameter tuning
+            print("[Expert Training] Skipping gate training - experts only mode")
+            total_steps = self.epochs
+            with tqdm(total=total_steps, desc="Expert Training", leave=True) as pbar:
+                if self.use_cached_experts and self.load_experts():
+                    # Skip pretraining; advance progress bar by pretrain steps
+                    pbar.update(self.epochs)
+                    print(f"[Cache] Using cached experts from {self.cache_dir}; skipping expert training.")
+                else:
+                    self.pretrain_experts(progress_update=pbar.update)
+            
+            # Save best models
+            self.save_best_models()
+            print(f"[Expert Evaluation] Evaluating individual experts")
+            return self.evaluate_individual_experts("test")
+        else:
+            # Full MoE training with gate
+            total_steps = self.epochs*2
+            with tqdm(total=total_steps, desc="MoE Training", leave=True) as pbar:
+                if self.use_cached_experts and self.load_experts():
+                    # Skip pretraining; advance progress bar by pretrain steps
+                    pbar.update(self.epochs)
+                    print(f"[Cache] Using cached experts from {self.cache_dir}; skipping expert training.")
+                else:
+                    self.pretrain_experts(progress_update=pbar.update)
+                if self.use_cached_gate and self.load_gate():
+                    # Skip gate training; advance progress bar by gate steps
+                    pbar.update(self.epochs)
+                    print(f"[Cache] Loaded cached gate from {self.cache_dir}; skipping gate training.")
+                else:
+                    self.train_gate(progress_update=pbar.update)
+                    self.save_gate()
+            # Save best models and use for final test evaluation
+            self.save_best_models()
+            print(f"[Final Evaluation] Using best models for test evaluation")
+            return self.evaluate("test")
 
 

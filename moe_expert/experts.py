@@ -71,15 +71,22 @@ class Expert2(ExpertBase):
         hidden, probs = self.forward(x)
         ce = F.cross_entropy(probs, y.long())
 
-        # Representation alignment
+        # Representation alignment - with stability improvements
         mu0, mu1 = self._group_means(hidden, sens)
         l_rep = F.mse_loss(mu0, mu1)
+        
+        # Add small regularization to prevent collapse
+        l_rep = l_rep + 1e-6 * (mu0.norm() + mu1.norm())
 
         # Differentiable DP/EO on probabilities of positive class
         probs_pos = probs[:, 1]
         l_dp = self._dp_gap(probs_pos, sens)
         l_eo = self._eo_gap(probs_pos, sens, y)
         l_fair = (l_dp + l_eo) / 2.0
+
+        # Add stability to prevent NaN/Inf
+        l_fair = torch.clamp(l_fair, 0.0, 10.0)
+        l_rep = torch.clamp(l_rep, 0.0, 10.0)
 
         loss = ce + self.lambda_rep * l_rep + self.lambda_fair * l_fair
         return {"loss": loss, "ce": ce, "rep": l_rep, "fair": l_fair}

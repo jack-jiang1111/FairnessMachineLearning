@@ -21,6 +21,56 @@
 
 \maketitle
 
+\section{Problem Formulation}
+
+Let $\mathcal{C} = \{c_1, c_2, \dots, c_N\}$ denote a set of platforms (clients). Each platform $c_i$ holds a private local dataset $D_i$ that cannot be accessed by other platforms:
+\begin{equation}
+    D_i = \{(x_{i,j}, s_{i,j}, y_{i,j})\}_{j=1}^{|D_i|},
+\end{equation}
+where $x_{i,j} \in \mathbb{R}^d$ is the feature vector of applicant $j$ on platform $i$ (including personal attributes and possibly representations of unstructured data), $s_{i,j} \in \{0,1\}$ is a binary sensitive attribute (e.g., $0$ = female, $1$ = male), and $y_{i,j} \in \{0,1\}$ is the target label indicating whether the applicant receives a positive decision.
+
+We study fairness with respect to $s$ and focus on both result fairness and procedural fairness. Let $f_\theta$ be a predictive model with parameters $\theta$. For an input $x$, the model outputs class probabilities $p = f_\theta(x) \in [0,1]^2$ and a predicted label $\hat{y} = \arg\max_c p_c$. Let $h_\theta(x)$ be the hidden representation and let $A_\theta(x) \in \mathbb{R}^d$ denote a normalized attribution ("attention") vector computed via a post-hoc interpreter (e.g., SHAP/IG/GradientSHAP), normalized so that $A_\theta(x) \ge 0$ and $\sum_{k=1}^d A_\theta(x)_k = 1$.
+
+\paragraph{Result Fairness Metrics.} We use Demographic Parity (DP) and Equal Opportunity (EO) gaps:
+\begin{align}
+    \text{DP} &= \left| \mathbb{P}(\hat{y}=1\mid s=1) - \mathbb{P}(\hat{y}=1\mid s=0) \right|, \\
+    \text{EO} &= \left| \mathbb{P}(\hat{y}=1\mid s=1, y=1) - \mathbb{P}(\hat{y}=1\mid s=0, y=1) \right|.
+\end{align}
+
+\paragraph{Procedural Fairness Metrics.} We consider three complementary notions derived from explanations and attributions. Let $\text{EQ}(x) \in \mathbb{R}_{\ge 0}$ denote a scalar explanation quality for instance $x$ produced by a fixed explainer. Define a top-$K$ rule: let $\tau_K$ be the $K$-th percentile of $\{\text{EQ}(x_j)\}_{j=1}^n$ over the evaluation set and
+\begin{equation}
+    \hat{q}_j = \mathbb{1}[\text{EQ}(x_j) \ge \tau_K].
+\end{equation}
+Let $G_s^K = \{ j : s_j = s,\; \hat{q}_j = 1 \}$ be the indices of top-$K$ high-quality explanations within group $s$.
+\begin{itemize}
+    \item \textbf{$\Delta$REF} (Ratio-based Explanation Fairness): difference in high-quality rates between groups
+    \begin{align}
+        \Delta\text{REF} &= \left| \mathbb{P}(\hat{q}=1\mid s=0) - \mathbb{P}(\hat{q}=1\mid s=1) \right|.
+    \end{align}
+    Smaller is better; $0$ indicates equal access to high-quality explanations.
+    \item \textbf{$\Delta$VEF} (Value-based Explanation Fairness): difference in average explanation quality among top-$K$ within each group
+    \begin{align}
+        \Delta\text{VEF} &= \left|\; \frac{1}{|G_0^K|} \sum_{j\in G_0^K} \text{EQ}(x_j)\;-
+        \frac{1}{|G_1^K|} \sum_{j\in G_1^K} \text{EQ}(x_j) \;\right|.
+    \end{align}
+    Smaller is better; $0$ indicates equal quality among the top-$K$ across groups.
+    \item \textbf{ATT\_JSD}: Jensen–Shannon divergence between the group-level attribution distributions
+    \begin{align}
+        \text{ATT\_JSD} &= \text{JSD}(\bar{A}_0, \bar{A}_1)
+        = \tfrac{1}{2}\,\text{KL}(\bar{A}_0 \Vert M) + \tfrac{1}{2}\,\text{KL}(\bar{A}_1 \Vert M), \\
+        M &= \tfrac{1}{2}(\bar{A}_0 + \bar{A}_1).
+    \end{align}
+\end{itemize}
+
+\paragraph{Problem Definition.} Given platforms $\mathcal{C}$ with local datasets $\{D_i\}_{i=1}^N$, learn a global model $f_\theta$ that maximizes predictive utility while mitigating result fairness gaps (DP/EO) and procedural fairness disparities (REF/VEF/ATT\_JSD), under data privacy constraints (no raw data sharing across platforms). A generic objective is
+\begin{equation}
+\label{eq:objective}
+    \min_{\theta}\; \mathbb{E}_{(x,y)\sim D}\big[\mathcal{L}_{\text{CE}}(f_\theta(x), y)\big]
+    + \lambda_{dp}\,\text{DP} + \lambda_{eo}\,\text{EO}
+    + \lambda_{ref}\,\Delta\text{REF} + \lambda_{vef}\,\Delta\text{VEF} + \lambda_{att}\,\text{ATT\_JSD},
+\end{equation}
+where $D = \bigcup_{i=1}^N D_i$ conceptually denotes the union distribution (implemented in practice via local training/aggregation), and $\lambda_{\bullet} \ge 0$ control the utility–fairness trade-off. Lower values of DP/EO/REF/VEF/ATT\_JSD indicate better fairness.
+
 \section{Introduction}
 
 This document provides a detailed mathematical and architectural analysis of the three expert models implemented in the Mixture of Experts (MoE) framework for fairness-aware machine learning. The system consists of three specialized neural network experts, each designed to address different aspects of fairness in machine learning: utility optimization, result-driven fairness, and procedural fairness.

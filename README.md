@@ -116,202 +116,68 @@ compare the two average attention distrubutions with jensen-shannon divergence a
 
 since the current training process doesn't contain a attention mechism, we need to use a SHAP value to measure it
 
+
+Stage 1 — Expert Tuning (Experts 1, 2, 3)
+🎯 Goal
+
+Find the best configuration for each expert’s internal losses and regularizations (e.g., lambda_rep, lambda_fair, lambda_attention, lambda_adv, lr, weight_decay).
+
+You treat each expert as if it were a standalone model trained on the same dataset.
+
+🧠 Step-by-step procedure
+1️⃣ Define search spaces per expert
+Expert	Main hyperparameters to tune	Typical range
+Expert 1 (baseline)	lr, weight_decay	lr ∈ [1e-5, 1e-3], wd ∈ [1e-6, 1e-3]
+Expert 2 (representation & fairness)	lr, weight_decay, lambda_rep, lambda_fair	λs ∈ [0.01, 10]
+Expert 3 (attention & adversarial)	lr, weight_decay, lambda_attention, lambda_adv	λs ∈ [0.01, 10]
+2️⃣ Training setup per expert
+Train each expert independently using the same dataset and labels.
+Ignore gating (or use uniform routing for now).
+Use early stopping on validation metric (accuracy − fairness penalty).
+Log both accuracy and fairness metrics (DP gap, EO gap).
+3️⃣ Hyperparameter optimization per expert
+Use random search or Bayesian optimization (Optuna):
+30–50 trials per expert.
+Evaluate on validation split.
+use the score system for expert1 (utility score)expert2 fairness result and expert 3 fairness procedure
+Pick top-k configs (e.g. top 3 per expert).
+4️⃣ Freeze best experts
+After finishing HPO:
+Save checkpoints for the best configuration of each expert (and optionally top 2–3 for robustness).
+Freeze their weights or allow small fine-tuning later (e.g., lr = 1e-5 during gate training).
+⚙️ Stage 2 — Gate Network Tuning
+🎯 Goal
+Find the gating parameters (gate_lr, entropy_coeff, lb_coeff) that best combine the experts you selected.
+🧠 Step-by-step
+1️⃣ Initialize
+Load the frozen expert checkpoints.
+Initialize the gate randomly.
+2️⃣ Define search space
+Parameter	Range	Comment
+gate_lr	[1e-5, 1e-3]	lower than expert lr
+entropy_coeff	[1e-5, 1e-2]	controls exploration vs exploitation
+lb_coeff	[1e-5, 1e-2]	ensures balanced expert usage
+Optionally add the fairness λs again (as fine-tuning knobs).
+3️⃣ Objective
+Use validation metric combining accuracy, fairness, and balance:
+score = final_score
+
+
+where γ controls how much you penalize unbalanced gating.
+4️⃣ Search strategy
+Use random search or Optuna Bayesian sampler.
+50–100 trials (cheaper because experts are fixed).
+Early stop if validation score not improving for 10–15 epochs.
+5️⃣ Evaluate and select
+Select best gate checkpoint.
+Test on hold-out test data with frozen experts.
+Optionally run top-3 gate configs across different seeds (0, 1, 2) to verify stability.
+🔁 Stage 3 — Optional Fine-Tuning (Integrated)
+After you find the best experts and gate:
+Optionally run one short joint fine-tuning pass with a small learning rate (e.g. 1e-5 for experts, 1e-4 for gate) to slightly improve integration.
+Use strong regularization and early stopping 
+
 python -m moe_expert.run_moe
 
 
-We treat the gate as a policy network that selects or weights experts. Reward is your proposed relative score:
-
-𝑅
-=
-(
-𝑢
-2
-−
-𝑢
-1
-)
-−
-(
-𝑓
-2
-−
-𝑓
-1
-)
-R=(u
-2
-	​
-
-−u
-1
-	​
-
-)−(f
-2
-	​
-
-−f
-1
-	​
-
-)
-🔎 RL Setup
-State
-
-Input features 
-𝑥
-x (same as experts).
-
-Optionally: disagreement signals between experts (e.g., variance of predictions).
-
-Action
-
-Gate outputs a distribution over experts (via softmax).
-
-Sample an expert (or weighted mixture with Gumbel-softmax).
-
-Reward
-
-Compute:
-
-Baseline scores from Expert1 → 
-𝑢
-1
-,
-𝑓
-1
-u
-1
-	​
-
-,f
-1
-	​
-
-.
-
-Mixture scores from gate output → 
-𝑢
-2
-,
-𝑓
-2
-u
-2
-	​
-
-,f
-2
-	​
-
-.
-
-Reward:
-
-𝑅
-=
-(
-𝑢
-2
-−
-𝑢
-1
-)
-−
-(
-𝑓
-2
-−
-𝑓
-1
-)
-R=(u
-2
-	​
-
-−u
-1
-	​
-
-)−(f
-2
-	​
-
-−f
-1
-	​
-
-)
-Policy Gradient
-
-Compute log-prob of chosen expert:
-
-m = torch.distributions.Categorical(probs_gate)
-action = m.sample()
-log_prob = m.log_prob(action)
-
-
-Loss (REINFORCE):
-
-advantage = R - baseline
-loss = -advantage * log_prob
-
-
-Update baseline with EMA of rewards to reduce variance.
-
-Add entropy bonus to encourage exploration.
-
-🧩 Pseudocode (training loop)
-for epoch in range(num_epochs):
-    Xb, yb, sb = get_batch()
-
-    # ---- Expert 1 baseline ----
-    _, p1 = expert1(Xb)
-    u1, f1 = compute_scores(p1, yb, sb)  # utility ↑, fairness ↓
-
-    # ---- Gate decision ----
-    probs_gate = gate(Xb)   # (batch, 3)
-    dist = torch.distributions.Categorical(probs_gate)
-    action = dist.sample()  # pick expert index per sample
-
-    # ---- Mixture result ----
-    outputs = []
-    _, p2 = expert2(Xb); outputs.append(p2)
-    _, p3 = expert3(Xb); outputs.append(p3)
-    experts = [p1, p2, p3]
-    chosen_outputs = torch.stack([experts[a][i] for i,a in enumerate(action)])
-
-    u2, f2 = compute_scores(chosen_outputs, yb, sb)
-
-    # ---- Reward ----
-    R = (u2 - u1) - (f2 - f1)
-    reward = torch.tensor(R, device=device)
-
-    # ---- Baseline and advantage ----
-    baseline = momentum * baseline + (1 - momentum) * reward.item()
-    advantage = reward - baseline
-
-    # ---- REINFORCE loss ----
-    log_prob = dist.log_prob(action)
-    entropy = dist.entropy().mean()
-    loss = -advantage * log_prob - beta * entropy
-
-    opt_g.zero_grad()
-    loss.backward()
-    opt_g.step()
-
-🛠️ Notes
-
-Per-batch reward: compute 
-𝑢
-,
-𝑓
-u,f averaged over batch (reduces noise).
-
-Baseline: EMA over last rewards.
-
-Entropy bonus: keeps gate from collapsing to uniform / single expert too early.
-
-Variance reduction: normalize rewards in batch (z-score).
-
-⚡ This way, the gate is pure RL: it learns a policy that chooses experts only when doing better than Expert1 baseline.
+compile pdf: pdflatex -interaction=nonstopmode moe_experts_summary.tex
