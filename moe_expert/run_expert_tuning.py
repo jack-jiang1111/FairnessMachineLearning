@@ -36,6 +36,22 @@ def main():
     print(f"Seed: {args.seed}")
     print(f"Trials per expert: {args.n_trials}")
     print(f"Cache directory: {args.cache_dir}")
+    
+    # CUDA Debug Information
+    import torch
+    print("="*80)
+    print("CUDA DEBUG INFORMATION")
+    print("="*80)
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
+        print(f"CUDA memory cached: {torch.cuda.memory_reserved(0) / 1024**3:.2f} GB")
+        print(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+    else:
+        print("WARNING: CUDA not available - will use CPU (very slow!)")
     print("="*80)
     
     # Create tuner

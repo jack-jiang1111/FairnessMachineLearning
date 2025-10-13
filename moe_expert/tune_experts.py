@@ -52,6 +52,10 @@ class ExpertTuner:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if torch.cuda.is_available():
             torch.cuda.set_device(cuda_device)
+            print(f"[DEBUG] Using CUDA device {cuda_device}: {torch.cuda.get_device_name(cuda_device)}")
+            print(f"[DEBUG] CUDA memory before data loading: {torch.cuda.memory_allocated(cuda_device) / 1024**3:.2f} GB")
+        else:
+            print("[DEBUG] WARNING: Using CPU - this will be very slow!")
             
         # Load dataset
         adj, features, labels, idx_train, idx_val, idx_test, sens = load_data_util(dataset)
@@ -66,6 +70,12 @@ class ExpertTuner:
         self.idx_test = idx_test.to(self.device)
         self.sens = sens.to(self.device)
         self.edge_index = edge_index.to(self.device)
+        
+        # Debug: Check device and memory after data loading
+        if torch.cuda.is_available():
+            print(f"[DEBUG] Data loaded to device: {self.X.device}")
+            print(f"[DEBUG] CUDA memory after data loading: {torch.cuda.memory_allocated(cuda_device) / 1024**3:.2f} GB")
+            print(f"[DEBUG] CUDA memory cached: {torch.cuda.memory_reserved(cuda_device) / 1024**3:.2f} GB")
         
         input_dim = self.X.shape[1]
         self.hidden_dim = 8 if dataset != "german" else 4
@@ -156,7 +166,7 @@ class ExpertTuner:
             return torch.tensor(0.0, device=X_batch.device)
     
     def train_expert(self, expert: nn.Module, expert_type: str, params: Dict[str, float], 
-                    epochs: int = 200) -> Tuple[float, Dict[str, float]]:
+                    epochs: int = 2000) -> Tuple[float, Dict[str, float]]:
         """Train a single expert and return validation score and metrics"""
         
         # Set up optimizer with gradient clipping for stability
@@ -177,11 +187,11 @@ class ExpertTuner:
         best_metrics = None
         
         # Early stopping
-        patience = 20
+        patience = 3
         no_improvement = 0
         
         # Warmup for Expert2 to prevent early collapse
-        warmup_epochs = 20 if expert_type == "expert2" else 0
+        warmup_epochs = 1000 if expert_type == "expert2" else 0
         
         for epoch in range(epochs):
             expert.train()
@@ -212,8 +222,8 @@ class ExpertTuner:
             
             optimizer.step()
             
-            # Validation evaluation every 10 epochs
-            if (epoch + 1) % 10 == 0:
+            # Validation evaluation every 100 epochs
+            if (epoch + 1) % 100 == 0:
                 expert.eval()
                 with torch.no_grad():
                     _, probs = expert(X_val)
