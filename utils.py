@@ -10,13 +10,13 @@ import torch.nn as nn
 
 def load_data_util(dataset):
     if dataset == 'german':
-        adj, features, labels, idx_train, idx_val, idx_test, sens = load_german('german', label_number=100, path="./dataset/german")
+        adj, features, labels, idx_train, idx_val, idx_test, sens = load_german('german', label_number=100, path=os.path.join("..", "dataset", "german"))
     elif dataset == 'bail':
-        adj, features, labels, idx_train, idx_val, idx_test, sens = load_bail('bail', label_number=100, path="./dataset/bail")
+        adj, features, labels, idx_train, idx_val, idx_test, sens = load_bail('bail', label_number=100, path=os.path.join("..", "dataset", "bail"))
     elif dataset == "math":
-        adj, features, labels, idx_train, idx_val, idx_test, sens = load_math(path="./dataset/math")
+        adj, features, labels, idx_train, idx_val, idx_test, sens = load_math(path=os.path.join("..", "dataset", "math"))
     elif dataset == "por":
-        adj, features, labels, idx_train, idx_val, idx_test, sens = load_por(path="./dataset/por")
+        adj, features, labels, idx_train, idx_val, idx_test, sens = load_por(path=os.path.join("..", "dataset", "por"))
     else:
         adj, features, labels, idx_train, idx_val, idx_test, sens = None, None, None, None, None, None, None
         print("This dataset is not supported up to now!")
