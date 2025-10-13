@@ -79,7 +79,7 @@ class GraphLIME_speedup:
         K_bar = K_bar.reshape(n ** 2, d)  # (n ** 2, d)
         L_bar = L_bar.reshape(n ** 2,)  # (n ** 2,)
 
-        solver = LassoLars(self.rho, fit_intercept=False, positive=True)
+        solver = LassoLars(self.rho, fit_intercept=False, normalize=False, positive=True)
 
         solver.fit(K_bar * n, L_bar * n)
 
@@ -107,7 +107,7 @@ class GraphLIME_speedup:
             K_bar = K_bar.reshape(n ** 2, d)  # (n ** 2, d)
             L_bar = L_bar.reshape(n ** 2,)  # (n ** 2,)
 
-            solver = LassoLars(self.rho, fit_intercept=False, positive=True)
+            solver = LassoLars(self.rho, fit_intercept=False, normalize=False, positive=True)
 
             try:
                 solver.fit(K_bar * n, L_bar * n)

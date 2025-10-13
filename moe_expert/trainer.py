@@ -247,35 +247,31 @@ class MoETrainer:
             if progress_update is not None:
                 progress_update(1)
 
-            # Logging after warm start: every 100 epochs
-            if epoch + 1 > warm_epochs and (epoch + 1) % 100 == 0:
+            # Validation monitoring and logging every 100 epochs after warm start
+            if (epoch + 1) % 100 == 0 and (epoch + 1) > warm_epochs:
                 self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
-                with torch.no_grad():
-                    _, p1 = self.expert1(Xb)
-                    _, p2 = self.expert2(Xb)
-                    _, p3 = self.expert3(Xb)
-                    y_prob = (p1 + p2 + p3) / 3.0
-                score, stats = compute_batch_scores(y_prob, yb, sb, self.interpreter, Xb, self.expert3)
-                print(
-                    f"[Pretrain][Epoch {epoch+1}] Final={score:.4f} | "
-                    f"U={stats['utility']:.4f} (ACC={stats['acc']:.3f}, F1={stats['f1']:.3f}, AUC={stats['auc']:.3f}) | "
-                    f"FR={stats['fair_res']:.4f} (DP={stats['sp']:.3f}, EO={stats['eo']:.3f}) | "
-                    f"FP={stats['fair_proc']:.4f} (REF={stats['REF']:.5f}, VEF={stats['VEF']:.5f}, ATT={stats['att_jsd']:.5f})"
-                )
-
-            # Validation monitoring every 100 epochs with model selection
-            if ((epoch + 1) % 100 == 0) and (epoch + 1) > warm_epochs:
-                self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
+                
+                # Get validation data
                 Xv = self.X[self.idx_val]
                 yv = self.labels[self.idx_val]
                 sv = self.sens[self.idx_val]
+                
                 with torch.no_grad():
+                    # Expert predictions on validation set
                     _, p1_val = self.expert1(Xv)
                     _, p2_val = self.expert2(Xv)
                     _, p3_val = self.expert3(Xv)
+                    
+                    # Combined prediction for logging
+                    y_prob_combined = (p1_val + p2_val + p3_val) / 3.0
+                
+                # Compute scores for each expert
                 score1, stats1 = compute_batch_scores(p1_val, yv, sv, self.interpreter, Xv, self.expert1, att_method='integrated_gradients')
                 score2, stats2 = compute_batch_scores(p2_val, yv, sv, self.interpreter, Xv, self.expert2, att_method='integrated_gradients')
                 score3, stats3 = compute_batch_scores(p3_val, yv, sv, self.interpreter, Xv, self.expert3, att_method='integrated_gradients')
+                
+                # Combined score for logging
+                score_combined, stats_combined = compute_batch_scores(y_prob_combined, yv, sv, self.interpreter, Xv, self.expert3)
                 
                 # Model selection: each expert optimized for its specialization
                 # Expert1: utility (higher is better)
@@ -293,6 +289,15 @@ class MoETrainer:
                     best_scores[3] = stats3['fair_proc']
                     best_states[3] = copy.deepcopy(self.expert3.state_dict())
                 
+                # Logging: Combined performance
+                print(
+                    f"[Pretrain][Epoch {epoch+1}] Final={score_combined:.4f} | "
+                    f"U={stats_combined['utility']:.4f} (ACC={stats_combined['acc']:.3f}, F1={stats_combined['f1']:.3f}, AUC={stats_combined['auc']:.3f}) | "
+                    f"FR={stats_combined['fair_res']:.4f} (DP={stats_combined['sp']:.3f}, EO={stats_combined['eo']:.3f}) | "
+                    f"FP={stats_combined['fair_proc']:.4f} (REF={stats_combined['REF']:.5f}, VEF={stats_combined['VEF']:.5f}, ATT={stats_combined['att_jsd']:.5f})"
+                )
+                
+                # Logging: Individual expert performance
                 print(f"Epoch {epoch+1}: Val scores - E1(utility): {stats1['utility']:.4f}, E2(fair_res): {stats2['fair_res']:.4f}, E3(fair_proc): {stats3['fair_proc']:.4f}")
                 print(f"Best scores so far - E1: {best_scores[1]:.4f}, E2: {best_scores[2]:.4f}, E3: {best_scores[3]:.4f}")
 
@@ -358,7 +363,12 @@ class MoETrainer:
             f1 = (eval_stats["baseline_fair_res"] + eval_stats["baseline_fair_proc"]) / 2.0
             u2 = eval_stats["utility"]
             f2 = (eval_stats["fair_res"] + eval_stats["fair_proc"]) / 2.0
-            reward_scalar = (u2 - u1) - (f2 - f1)
+            # Use percentage-based reward: fairness improvement percent minus utility decrease percent.
+            # This rewards larger relative reductions in unfairness with smaller relative drops in utility.
+            eps = 1e-8
+            fair_improve_pct = (f1 - f2) / max(abs(f1), eps)
+            utility_decrease_pct = (u1 - u2) / max(abs(u1), eps)
+            reward_scalar = fair_improve_pct - utility_decrease_pct
             reward = torch.tensor(reward_scalar, device=self.device, dtype=torch.float32)
 
             # Baseline and advantage

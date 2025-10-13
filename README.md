@@ -178,6 +178,6 @@ Optionally run one short joint fine-tuning pass with a small learning rate (e.g.
 Use strong regularization and early stopping 
 
 python -m moe_expert.run_moe
-
+python -m moe_expert.run_moe --epochs 2000 --lr 0.00015 --weight_decay 1.4e-5 --lambda_rep 0.192 --lambda_fair 1.67 --lambda_attention 1.04 --lambda_adv 2.0 --use_cached_experts
 
 compile pdf: pdflatex -interaction=nonstopmode moe_experts_summary.tex
