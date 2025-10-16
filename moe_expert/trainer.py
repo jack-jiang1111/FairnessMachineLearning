@@ -23,6 +23,8 @@ from utils import load_data_util, normalize_scipy, feature_norm, fair_metric, se
 from torch_geometric.utils import convert
 from explanation_metrics import Interpreter
 from attention_fairness_utils import compute_attention_fairness_loss, evaluate_attention_fairness
+from train_mlp_benchmark import train_mlp
+from mlp import MLP
 
 
 def compute_batch_scores(y_prob: torch.Tensor, y_true: torch.Tensor, sens: torch.Tensor, interpreter: Interpreter, X_batch: torch.Tensor, model_for_att, att_method: str = 'integrated_gradients'):
@@ -112,11 +114,11 @@ class MoETrainer:
         self.expert2 = Expert2(input_dim, hidden_dim, lambda_rep=lambda_rep, lambda_fair=lambda_fair).to(self.device)
         self.expert3 = Expert3(input_dim, hidden_dim, lambda_attention=lambda_attention, lambda_adv=lambda_adv).to(self.device)
 
-        # Optionally load cached experts
+        # Optionally load cached experts (but Expert1 will be overridden by MLP benchmark)
         if self.use_cached_experts:
             loaded = self.load_experts()
             if loaded:
-                print(f"[Cache] Loaded experts from {self.cache_dir}, skipping pretraining.")
+                print(f"[Cache] Loaded experts from {self.cache_dir}, but Expert1 will be replaced by MLP benchmark.")
             else:
                 print(f"[Cache] No cached experts found for dataset={self.dataset}, will pretrain and save.")
 
@@ -135,10 +137,9 @@ class MoETrainer:
         self.interpreter = Interpreter(features=self.X, edge_index=self.edge_index,
                                        utility_labels=self.labels, sensitive_labels=self.sens, top_ratio=0.2, topK=1)
 
-        # Optimizers
-        self.opt_e = optim.Adam(list(self.expert1.parameters()) +
-                                list(self.expert2.parameters()) +
-                                list(self.expert3.parameters()), lr=self.lr, weight_decay=self.weight_decay)
+        # Optimizers (Expert1 is pre-trained, so only optimize Expert2 and Expert3)
+        self.opt_e2 = optim.Adam(self.expert2.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.opt_e3 = optim.Adam(self.expert3.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.opt_g = optim.Adam(self.gate.parameters(), lr=self.gate_lr, weight_decay=0.0)
 
         self.baseline = 0.0  # moving average baseline for REINFORCE
@@ -172,20 +173,18 @@ class MoETrainer:
         print(f"[Cache] Gate saved to {gp}")
 
     def save_best_models(self):
-        """Save best models with 'best' suffix"""
+        """Save best models with 'best' suffix (Expert1 is always MLP benchmark, not saved here)"""
         os.makedirs(self.cache_dir, exist_ok=True)
         base = f"{self.dataset}"
         best_paths = (
-            os.path.join(self.cache_dir, f"{base}_expert1_best.pt"),
             os.path.join(self.cache_dir, f"{base}_expert2_best.pt"),
             os.path.join(self.cache_dir, f"{base}_expert3_best.pt"),
             os.path.join(self.cache_dir, f"{base}_gate_best.pt"),
         )
-        torch.save(self.expert1.state_dict(), best_paths[0])
-        torch.save(self.expert2.state_dict(), best_paths[1])
-        torch.save(self.expert3.state_dict(), best_paths[2])
-        torch.save(self.gate.state_dict(), best_paths[3])
-        print(f"[Cache] Best models saved to {self.cache_dir}")
+        torch.save(self.expert2.state_dict(), best_paths[0])
+        torch.save(self.expert3.state_dict(), best_paths[1])
+        torch.save(self.gate.state_dict(), best_paths[2])
+        print(f"[Cache] Best models saved to {self.cache_dir} (Expert1 is MLP benchmark, not saved)")
 
 
     def load_experts(self) -> bool:
@@ -213,42 +212,85 @@ class MoETrainer:
     def attention_loss_fn(self, model, X_batch, sens_batch):
         return compute_attention_fairness_loss(model, X_batch, sens_batch, method='integrated_gradients', background_X=X_batch[:min(50, X_batch.shape[0])])
 
+    def train_mlp_benchmark(self):
+        """Train MLP benchmark and load it into Expert1"""
+        model_filename = f"./weights/{self.dataset}_mlp_best_seed_{self.seed}.pth"
+        
+        # Check if model already exists
+        if os.path.exists(model_filename):
+            print(f"[MLP Benchmark] Found existing MLP model for {self.dataset} seed {self.seed}")
+            mlp_state = torch.load(model_filename, map_location=self.device)
+            self.expert1.load_state_dict(mlp_state)
+            print(f"[MLP Benchmark] Loaded existing MLP model into Expert1 from {model_filename}")
+
+            # Compute validation results directly (no cached results loading)
+            self.expert1.eval()
+            train_stats = self.evaluate("train")
+            val_stats = self.evaluate("val")
+            test_stats = self.evaluate("test")
+            mlp_results = {"acc": train_stats['acc'], "f1": train_stats['f1'], "auc": train_stats['auc']}
+            print(f"[MLP Benchmark] MLP Results Train - Acc: {train_stats['acc']:.4f}, F1: {train_stats['f1']:.4f}, AUC: {train_stats['auc']:.4f}")
+            print(f"[MLP Benchmark] MLP Results Val - Acc: {val_stats['acc']:.4f}, F1: {val_stats['f1']:.4f}, AUC: {val_stats['auc']:.4f}")
+            print(f"[MLP Benchmark] MLP Results Test - Acc: {test_stats['acc']:.4f}, F1: {test_stats['f1']:.4f}, AUC: {test_stats['auc']:.4f}")
+            return mlp_results
+        
+        # Model doesn't exist, train new one
+        print(f"[MLP Benchmark] Training new utility-focused MLP for {self.dataset} seed {self.seed}")
+        mlp_results = train_mlp(
+            dataset=self.dataset,
+            epochs=10000,  # Default 10k epochs for MLP benchmark
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+            dropout=0.3,
+            seed=self.seed
+        )
+        
+        # Load the newly trained MLP model into Expert1
+        if os.path.exists(model_filename):
+            mlp_state = torch.load(model_filename, map_location=self.device)
+            self.expert1.load_state_dict(mlp_state)
+            print(f"[MLP Benchmark] Loaded newly trained MLP model into Expert1 from {model_filename}")
+            print(f"[MLP Benchmark] MLP Results Train - Acc: {mlp_results['acc']:.4f}, F1: {mlp_results['f1']:.4f}, AUC: {mlp_results['auc']:.4f}")
+            
+        else:
+            print(f"[MLP Benchmark] Warning: Could not find saved MLP model at {model_filename}")
+        
+        return mlp_results
+
     def pretrain_experts(self, progress_update=None):
-        warm_epochs = self.epochs // 2
-        best_scores = {1: -float('inf'), 2: float('inf'), 3: float('inf')}  # E1: max utility, E2/E3: min fairness
-        best_states = {1: None, 2: None, 3: None}
+        # First, train MLP benchmark for Expert1 (always override any cached Expert1)
+        mlp_results = self.train_mlp_benchmark()
+        cached_utility = (mlp_results['acc'] + mlp_results['f1'] + mlp_results['auc']) / 3.0
+        
+        # Now train Expert2 and Expert3 only
+        best_scores = {2: float('inf'), 3: float('inf')}  # E2/E3: min fairness
+        best_states = {2: None, 3: None}
 
         for epoch in range(self.epochs):
-            self.expert1.train(); self.expert2.train(); self.expert3.train()
-            self.opt_e.zero_grad()
+            self.expert2.train(); self.expert3.train()
 
             Xb = self.X[self.idx_train]
             yb = self.labels[self.idx_train]
             sb = self.sens[self.idx_train]
 
-            # Expert1 CE only
-            out1 = self.expert1.compute_loss(Xb, yb)
+            # Expert2: result fairness
+            out2 = self.expert2.compute_loss(Xb, yb, sb)
+            self.opt_e2.zero_grad()
+            out2["loss"].backward()
+            self.opt_e2.step()
 
-            # Expert2 CE during warmup (fairness later)
-            out2 = self.expert2.compute_loss(Xb, yb, sb) if epoch >= warm_epochs else {"loss": F.cross_entropy(self.expert2(Xb)[1], yb)}
-
-            # Expert3 CE during warmup (attention+adv later)
-            if epoch >= warm_epochs:
-                out3 = self.expert3.compute_loss(Xb, yb, sb, self.attention_loss_fn)
-            else:
-                _, p3 = self.expert3(Xb)
-                out3 = {"loss": F.cross_entropy(p3, yb)}
-
-            loss = out1["loss"] + out2["loss"] + out3["loss"]
-            loss.backward()
-            self.opt_e.step()
+            # Expert3: procedural fairness
+            out3 = self.expert3.compute_loss(Xb, yb, sb, self.attention_loss_fn)
+            self.opt_e3.zero_grad()
+            out3["loss"].backward()
+            self.opt_e3.step()
 
             # Progress update per epoch (overall bar). During warm start, only bar is shown
             if progress_update is not None:
                 progress_update(1)
 
             # Validation monitoring and logging every 100 epochs after warm start
-            if (epoch + 1) % 100 == 0 and (epoch + 1) > warm_epochs:
+            if (epoch + 1) % 100 == 0:
                 self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
                 
                 # Get validation data
@@ -265,20 +307,20 @@ class MoETrainer:
                     # Combined prediction for logging
                     y_prob_combined = (p1_val + p2_val + p3_val) / 3.0
                 
-                # Compute scores for each expert
-                score1, stats1 = compute_batch_scores(p1_val, yv, sv, self.interpreter, Xv, self.expert1, att_method='integrated_gradients')
-                score2, stats2 = compute_batch_scores(p2_val, yv, sv, self.interpreter, Xv, self.expert2, att_method='integrated_gradients')
+                # Fast evaluation: only compute what's needed for each expert
+                # Expert1: Use cached utility score (pre-trained MLP)
+                stats1 = {"utility": cached_utility}  # Use cached MLP benchmark result
+                
+                # Expert2: Only result fairness (DP/EO) - fast computation
+                y_pred2 = p2_val.argmax(dim=1)
+                sp2, eo2 = fair_metric(y_pred2.cpu().numpy(), yv.cpu().numpy(), sv.cpu().numpy())
+                fair_res2 = (sp2 + eo2) / 2.0
+                stats2 = {"fair_res": fair_res2}
+                
+                # Expert3: Only procedural fairness - compute full score for model selection
                 score3, stats3 = compute_batch_scores(p3_val, yv, sv, self.interpreter, Xv, self.expert3, att_method='integrated_gradients')
                 
-                # Combined score for logging
-                score_combined, stats_combined = compute_batch_scores(y_prob_combined, yv, sv, self.interpreter, Xv, self.expert3)
-                
-                # Model selection: each expert optimized for its specialization
-                # Expert1: utility (higher is better)
-                if stats1['utility'] > best_scores[1]:
-                    best_scores[1] = stats1['utility']
-                    best_states[1] = copy.deepcopy(self.expert1.state_dict())
-                
+                # Model selection: Expert2 and Expert3 only (Expert1 is pre-trained MLP)
                 # Expert2: result fairness (lower is better, so we minimize)
                 if stats2['fair_res'] < best_scores[2]:
                     best_scores[2] = stats2['fair_res']
@@ -289,22 +331,11 @@ class MoETrainer:
                     best_scores[3] = stats3['fair_proc']
                     best_states[3] = copy.deepcopy(self.expert3.state_dict())
                 
-                # Logging: Combined performance
-                print(
-                    f"[Pretrain][Epoch {epoch+1}] Final={score_combined:.4f} | "
-                    f"U={stats_combined['utility']:.4f} (ACC={stats_combined['acc']:.3f}, F1={stats_combined['f1']:.3f}, AUC={stats_combined['auc']:.3f}) | "
-                    f"FR={stats_combined['fair_res']:.4f} (DP={stats_combined['sp']:.3f}, EO={stats_combined['eo']:.3f}) | "
-                    f"FP={stats_combined['fair_proc']:.4f} (REF={stats_combined['REF']:.5f}, VEF={stats_combined['VEF']:.5f}, ATT={stats_combined['att_jsd']:.5f})"
-                )
-                
-                # Logging: Individual expert performance
-                print(f"Epoch {epoch+1}: Val scores - E1(utility): {stats1['utility']:.4f}, E2(fair_res): {stats2['fair_res']:.4f}, E3(fair_proc): {stats3['fair_proc']:.4f}")
-                print(f"Best scores so far - E1: {best_scores[1]:.4f}, E2: {best_scores[2]:.4f}, E3: {best_scores[3]:.4f}")
+                # Logging: Individual expert performance (fast)
+                print(f"Epoch {epoch+1}: Val scores - E1(utility): {stats1['utility']:.4f} [MLP], E2(fair_res): {stats2['fair_res']:.4f}, E3(fair_proc): {stats3['fair_proc']:.4f}")
+                print(f"Best scores so far - E2: {best_scores[2]:.4f}, E3: {best_scores[3]:.4f}")
 
-        # Load best models from validation
-        if best_states[1] is not None:
-            self.expert1.load_state_dict(best_states[1])
-            print(f"[Model Selection] Loaded best Expert1 (utility: {best_scores[1]:.4f})")
+        # Load best models from validation (Expert1 is already loaded from MLP benchmark)
         if best_states[2] is not None:
             self.expert2.load_state_dict(best_states[2])
             print(f"[Model Selection] Loaded best Expert2 (fair_res: {best_scores[2]:.4f})")
@@ -325,7 +356,7 @@ class MoETrainer:
         
         # Early stopping for gate
         no_improvement_count = 0
-        early_stop_patience = 3 # if no improvement for 300 epochs, stop
+        early_stop_patience = 5 # if no improvement for 500 epochs, stop
         
         for epoch in range(gate_epochs):
             Xb = self.X[self.idx_train]
@@ -358,7 +389,7 @@ class MoETrainer:
             #y_prob_selected = expert_stack.gather(dim=1, index=actions_expanded).squeeze(1)
 
             # Use unified evaluation for consistent reward components
-            eval_stats = self.compute_eval_stats(Xb, yb, sb)
+            eval_stats = self.evaluate("train")
             u1 = eval_stats["baseline_utility"]
             f1 = (eval_stats["baseline_fair_res"] + eval_stats["baseline_fair_proc"]) / 2.0
             u2 = eval_stats["utility"]
@@ -448,16 +479,23 @@ class MoETrainer:
                     print(f"[Early Stop] Gate training: No improvement for {early_stop_patience} epochs. Stopping at epoch {epoch+1}")
                     break
 
-            # Light expert fine-tuning every 100 epochs
+            # Light expert fine-tuning every 100 epochs (Expert1 is pre-trained MLP, so only fine-tune Expert2 and Expert3)
             if (epoch + 1) % 100 == 0:
-                self.expert1.train(); self.expert2.train(); self.expert3.train()
-                self.opt_e.zero_grad()
-                out1 = self.expert1.compute_loss(Xb, yb)
+                self.expert2.train(); self.expert3.train()
+                
+                # Expert2 fine-tuning
                 out2 = self.expert2.compute_loss(Xb, yb, sb)
+                self.opt_e2.zero_grad()
+                out2["loss"].backward()
+                self.opt_e2.step()
+                
+                # Expert3 fine-tuning
                 out3 = self.expert3.compute_loss(Xb, yb, sb, self.attention_loss_fn)
-                (out1["loss"] + out2["loss"] + out3["loss"]).backward()
-                self.opt_e.step()
-                self.expert1.eval(); self.expert2.eval(); self.expert3.eval()
+                self.opt_e3.zero_grad()
+                out3["loss"].backward()
+                self.opt_e3.step()
+                
+                self.expert2.eval(); self.expert3.eval()
 
         # Load best gate model from validation
         if best_gate_state is not None:
@@ -478,8 +516,6 @@ class MoETrainer:
             _, p1 = self.expert1(Xb)
             _, p2 = self.expert2(Xb)
             _, p3 = self.expert3(Xb)
-
-            
 
             # Gate state features
             conf1 = p1.max(dim=1, keepdim=True).values

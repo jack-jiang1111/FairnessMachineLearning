@@ -5,7 +5,7 @@ from .trainer import MoETrainer
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--dataset', type=str, default='bail')
-    p.add_argument('--epochs', type=int, default=200)
+    p.add_argument('--epochs', type=int, default=2000)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--cuda_device', type=int, default=0)
     p.add_argument('--lr', type=float, default=1e-3)

@@ -21,8 +21,20 @@ class ExpertBase(nn.Module):
         return self.backbone.predict_proba(x)
 
 
-class Expert1(ExpertBase):
-    """Utility-focused expert using standard cross-entropy."""
+class Expert1(MLP):
+    """Utility-focused expert using the same MLP architecture as the benchmark."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 8):
+        arch = [input_dim, hidden_dim, 2]
+        super().__init__(arch, dropout=0.3)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        hidden, logits = super().forward(x)
+        probs = F.softmax(logits, dim=1)
+        return hidden, probs
+
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        return super().predict_proba(x)
 
     def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> Dict[str, torch.Tensor]:
         hidden, probs = self.forward(x)

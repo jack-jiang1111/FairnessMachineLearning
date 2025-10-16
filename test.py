@@ -60,12 +60,12 @@ def train(epoch, model, max_score):
                 sens[idx_val.cpu().numpy()].cpu().numpy())
 
             # explanation fairness metrics (validation)
-            p0_val, p1_val, REF_val, v0_val, v1_val, VEF_val \
+            p0_val, p1_val, REF_val, v0_val, v1_val, VEF_val, att_jsd_val \
             = interpretation.interprete(model=model, idx=idx_val.cpu().numpy())
 
             # record the best score
             score = (auc_roc_val+f1_val+acc_val)/3.0-(sp_val+eo_val)/2.0\
-            -(REF_val+VEF_val)/2.0
+            -(REF_val+VEF_val+att_jsd_val)/3.0
             if score >= max_score:
                 max_score = score
                 torch.save(model.state_dict(), "./weights/"+args.dataset+\
@@ -163,18 +163,38 @@ if __name__ == '__main__':
      sens[idx_test.cpu().numpy()].cpu().numpy())
 
     # explanation fairness metrics (test)
-    p0_test, p1_test, REF_test, v0_test, v1_test, VEF_test \
+    p0_test, p1_test, REF_test, v0_test, v1_test, VEF_test, att_jsd_test \
     = interpretation.interprete(model=model, \
         idx=idx_test.cpu().numpy())
     logs = [
         acc_test, auc_roc_test, f1_test, \
         sp_test, eo_test, \
         p0_test, p1_test, REF_test, \
-        v0_test, v1_test, VEF_test
+        v0_test, v1_test, VEF_test, att_jsd_test
         ]
 
-    # Log results (no file writing)
+    # Log results in human-readable format
     logs = np.array(logs)
-    print(f"Test Results: {logs}")
+    
+    print("\n" + "="*60)
+    print("TEST RESULTS SUMMARY")
+    print("="*60)
+    
+    print("\nUTILITY METRICS:")
+    print(f"  Accuracy:     {logs[0]:.4f} ({logs[0]*100:.2f}%)")
+    print(f"  AUC-ROC:      {logs[1]:.4f}")
+    print(f"  F1-Score:     {logs[2]:.4f}")
+    
+    print("\nTRADITIONAL FAIRNESS METRICS:")
+    print(f"  Statistical Parity:     {logs[3]:.4f}")
+    print(f"  Equalized Odds:         {logs[4]:.4f}")
+    
+    print("\nEXPLANATION FAIRNESS METRICS:")
+    print(f"  REF (Representation):   {logs[7]:.4f}")
+    print(f"  VEF (Variance):         {logs[10]:.4f}")
+    print(f"  Attention JSD:          {logs[11]:.4f}")
+
+    
+    print("\n" + "="*60)
 
 
